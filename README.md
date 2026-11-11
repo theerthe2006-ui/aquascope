@@ -1,6 +1,6 @@
 # AQUASCOPE — Microplastic Intelligence & Water Monitoring Platform
 
-AQUASCOPE is a scientific software platform for environmental monitoring teams, laboratory researchers, and water resource managers to record, review, analyse, and report microplastic observations in water bodies.
+AQUASCOPE is a scientific software platform for environmental monitoring teams, laboratory researchers, and water resource managers to record, review, analyse, and report microplastic observations in water bodies with strict scientific integrity and provenance tracking.
 
 ---
 
@@ -8,133 +8,102 @@ AQUASCOPE is a scientific software platform for environmental monitoring teams, 
 
 ```
 AQUASCOPE/
-├── backend/                # Spring Boot 3.4.3 (Java 25 runtime, release 21 bytecode)
+├── backend/                # Spring Boot 3.4.3 (Java 21/25 runtime, Docker containerized)
+│   ├── Dockerfile          # Multi-stage production Docker build (Eclipse Temurin 21)
 │   ├── src/main/java/com/aquascope/
-│   │   ├── config/         # CORS and application configurations
-│   │   ├── controller/     # REST controllers (HealthController, etc.)
-│   │   ├── dto/            # Standardized ApiResponse and HealthResponse records
-│   │   ├── entity/         # Domain entities (Users, MonitoringSites, etc.)
-│   │   ├── exception/      # Global centralized exception handling
+│   │   ├── config/         # CORS, Security, and Dynamic JDBC Database configuration
+│   │   ├── controller/     # REST controllers (Auth, Sites, Samples, Analysis, Evidence, Reviews, Devices, Dashboard, Reports, Health)
+│   │   ├── dto/            # Standardized API response records and payloads
+│   │   ├── entity/         # Domain entities (Users, Sites, WaterSamples, Analyses, Evidence, Reviews, Devices, SensorReadings)
+│   │   ├── exception/      # Centralized exception handling
 │   │   ├── repository/     # Spring Data JPA repositories
-│   │   └── service/        # Business logic layer (HealthService, etc.)
+│   │   ├── security/       # JWT token authentication and role-based access control
+│   │   └── service/        # Scientific workflow and business logic services
 │   ├── src/main/resources/
 │   │   ├── application.yml # Production/dev configuration & datasource bindings
-│   │   └── db/migration/   # Flyway SQL migrations (V1__initial_schema.sql)
+│   │   └── db/migration/   # Flyway SQL migrations:
+│   │       ├── V1__initial_schema.sql       # 11 core scientific schema tables
+│   │       └── V2__seed_initial_users.sql   # Seeded role-based user accounts
 │   └── src/test/           # JUnit 5 & Mockito integration tests
 ├── frontend/               # React 19 + TypeScript + Vite + Tailwind CSS
+│   ├── vercel.json         # Production SPA route rewrite configuration
 │   ├── src/
-│   │   ├── components/     # Shell layout, Sidebar, Header with live health probe
-│   │   ├── pages/          # Dashboard, Samples, Monitoring Sites, Analytics, Reports
-│   │   ├── services/       # Axios API client (/api/v1)
-│   │   └── types/          # Contract types matching backend DTOs
-└── docs/                   # System design, API contracts, scientific workflows
+│   │   ├── components/     # Layout, Navigation, Header with live health probe, ProtectedRoute
+│   │   ├── context/        # AuthContext for JWT and role-based permissions
+│   │   ├── pages/          # Dashboard, Locations, Samples, Analysis, Devices, Audit, Analytics, Reports, Settings
+│   │   ├── services/       # Axios API client (/api/v1) with Bearer token interceptor
+│   │   └── types/          # Strict TypeScript contract interfaces matching backend DTOs
+└── render.yaml             # Render Blueprint definition (Managed PostgreSQL + Web Service Docker + Persistent Disk)
 ```
+
+---
+
+## Core Scientific Principles & Data Integrity
+
+1. **Explicit Data Origin Tracking:** All measurements and observations are strictly categorized (`MANUAL`, `DEVICE`, `SIMULATED`). Simulated values are never conflated with real experimental measurements.
+2. **Spectroscopic Verification:** Physical particle counts (microscopy observations) are clearly distinguished from verified polymer identifications (FTIR, Raman spectroscopy).
+3. **Sensor Demarcation:** Physical environmental parameters (pH, turbidity, dissolved oxygen, temperature) recorded by deployed field sensors are kept separate from laboratory microplastic analysis.
+4. **Peer Review Audit Trail:** Analyses require formal peer review (approval or rejection with reviewer rationale and immutable timestamps) before being finalized for reporting.
 
 ---
 
 ## Technology Stack
 
-- **Backend:** Java 25 (OpenJDK 25.0.3), Spring Boot 3.4.3, Spring Web, Spring Data JPA, Hibernate, PostgreSQL Driver, Flyway Migration, Actuator, JUnit 5, Maven Wrapper (`mvnw`).
-- **Frontend:** React 19, TypeScript, Vite, Tailwind CSS, Lucide React, React Router 7, Axios.
-- **Database:** PostgreSQL 18.6 (Service: `postgresql-x64-18`, port `5432`, database: `aquascope`).
+- **Backend:** Java 21/25 (Spring Boot 3.4.3, Spring Web, Spring Data JPA, Hibernate, Flyway, JWT, Actuator, JUnit 5).
+- **Frontend:** React 19, TypeScript, Vite, Tailwind CSS, Lucide React, React Router 7, Axios, Recharts.
+- **Database:** PostgreSQL 18+ (Production: Render PostgreSQL; Test: in-memory H2 with PostgreSQL compatibility mode).
+- **Deployment:** Render (Backend via Docker & Managed PostgreSQL with 1GB persistent disk for microscopy evidence), Vercel (Frontend SPA).
 
 ---
 
-## Prerequisites
+## Production Deployment (Render + Vercel)
 
-1. **Java JDK 21+** (JDK 25.0.3 verified)
-2. **Node.js 20+** (v24.13.1 verified) & **npm 11+**
-3. **PostgreSQL 18** running locally on port `5432`
+### 1. Backend & Database (Render Blueprint)
+The repository contains `render.yaml` declaring:
+- **`aquascope-db`**: Free-tier managed PostgreSQL instance.
+- **`aquascope-backend`**: Dockerized Spring Boot service built via `backend/Dockerfile` with persistent disk mounted at `/var/data/aquascope/uploads` for evidence images.
+- Automatic conversion from Render's `postgres://` connection string to JDBC `jdbc:postgresql://` format via `DatabaseConfig`.
+- Health check path set to `/api/v1/health`.
 
----
-
-## Environment Variables
-
-### Backend Configuration
-Configure these environment variables or provide them when running Spring Boot:
-
-| Variable | Description | Default |
-|---|---|---|
-| `SPRING_DATASOURCE_URL` | PostgreSQL JDBC Connection URL | `jdbc:postgresql://localhost:5432/aquascope` |
-| `SPRING_DATASOURCE_USERNAME` | PostgreSQL User | `postgres` |
-| `SPRING_DATASOURCE_PASSWORD` | PostgreSQL Password | *(set by user)* |
-| `SPRING_PROFILES_ACTIVE` | Active profile (`dev`, `test`, `prod`) | `dev` |
-| `CORS_ALLOWED_ORIGINS` | Whitelisted frontend origins | `http://localhost:5173,http://localhost:3000` |
-
-### Frontend Configuration
-Create or edit `frontend/.env`:
-```env
-VITE_API_BASE_URL=http://localhost:8080/api/v1
-```
+### 2. Frontend (Vercel)
+- Root directory: `frontend`
+- Build command: `npm run build`
+- Output directory: `dist`
+- Configured environment variable: `VITE_API_BASE_URL` pointing to `https://<backend-service>.onrender.com/api/v1`.
+- SPA rewrites handled by `frontend/vercel.json`.
 
 ---
 
-## Startup & Execution Instructions
+## Local Development & Testing Instructions
 
 ### 1. Database Initialization
-Ensure PostgreSQL has the `aquascope` database created:
 ```bash
-# Using psql:
 psql -U postgres -h localhost -c "CREATE DATABASE aquascope;"
 ```
 
-### 2. Backend Startup
-From the `backend` directory:
-```powershell
-cd backend
-
-# On Windows:
-$env:SPRING_DATASOURCE_PASSWORD="<your_postgres_password>"
-.\mvnw.cmd spring-boot:run
-```
-The backend initializes on `http://localhost:8080`. Flyway automatically executes migrations from `classpath:db/migration`.
-
-### 3. Running Backend Tests
+### 2. Run Backend Tests
 ```powershell
 cd backend
 .\mvnw.cmd clean test
 ```
-The test suite runs against an isolated, in-memory PostgreSQL-compatible H2 instance with Flyway decoupled, leaving production data untouched.
+*Executes unit and scientific workflow integration tests covering authentication, RBAC, sample creation, evidence handling, and reviews.*
 
-### 4. Frontend Startup
-From the `frontend` directory:
+### 3. Run Backend Locally
+```powershell
+cd backend
+$env:SPRING_DATASOURCE_PASSWORD="your_password"
+.\mvnw.cmd spring-boot:run
+```
+
+### 4. Run Frontend Locally
 ```powershell
 cd frontend
 npm install
 npm run dev
 ```
-Open your browser at `http://localhost:5173`.
 
 ### 5. Frontend Production Build Verification
 ```powershell
 cd frontend
 npm run build
 ```
-
----
-
-## Core Health Endpoint Verification
-
-- **GET** `/api/v1/health`
-- **Response Shape:**
-```json
-{
-  "success": true,
-  "message": "Health status retrieved successfully",
-  "data": {
-    "status": "UP",
-    "application": "aquascope-backend",
-    "version": "1.0.0-phase1",
-    "environment": "dev",
-    "timestamp": "2026-11-11T18:00:00Z",
-    "database": {
-      "connected": true,
-      "databaseType": "PostgreSQL",
-      "details": "PostgreSQL 18.6"
-    }
-  },
-  "timestamp": "2026-11-11T18:00:00Z",
-  "errors": null
-}
-```
-Credentials and connection strings are strictly shielded from all health responses.
