@@ -1,0 +1,12 @@
+# Root gitignore
+target/
+**/target/
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.env.local
+.env.*.local
+*.log
+.DS_Store
+Thumbs.db

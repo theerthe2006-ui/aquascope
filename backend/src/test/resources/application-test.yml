@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: aquascope-backend-test
+  datasource:
+    url: jdbc:h2:mem:aquascope_test;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;MODE=PostgreSQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: create-drop
+  flyway:
+    enabled: false
+app:
+  version: 1.0.0-test
