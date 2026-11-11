@@ -29,6 +29,12 @@ public class SampleImages {
     @Column(name = "stored_file_path", nullable = false, length = 500)
     private String storedFilePath;
 
+    @Column(name = "object_key", length = 500)
+    private String objectKey;
+
+    @Column(name = "sha256_checksum", length = 64)
+    private String sha256Checksum;
+
     @Column(name = "content_type", nullable = false, length = 100)
     private String contentType;
 
@@ -81,6 +87,12 @@ public class SampleImages {
 
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
+
+    public String getObjectKey() { return objectKey; }
+    public void setObjectKey(String objectKey) { this.objectKey = objectKey; }
+
+    public String getSha256Checksum() { return sha256Checksum; }
+    public void setSha256Checksum(String sha256Checksum) { this.sha256Checksum = sha256Checksum; }
 
     public Instant getCreatedAt() { return createdAt; }
 }

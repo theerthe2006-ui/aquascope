@@ -1,108 +1,110 @@
 # AQUASCOPE — Microplastic Intelligence & Water Monitoring Platform
 
-AQUASCOPE is a scientific software platform for environmental monitoring teams, laboratory researchers, and water resource managers to record, review, analyse, and report microplastic observations in water bodies with strict scientific integrity and provenance tracking.
+AQUASCOPE is a scientific software platform for environmental monitoring teams, laboratory researchers, and water resource managers to record, review, analyse, and report microplastic observations in water bodies with strict scientific integrity, provenance tracking, and role-based permissions.
 
 ---
 
-## Architecture Overview
+## Free-Tier Cloud Architecture
+
+To ensure 100% free-tier operation without expiring trial databases or billable persistent disks, AQUASCOPE utilizes the following decoupled cloud architecture:
 
 ```
-AQUASCOPE/
-├── backend/                # Spring Boot 3.4.3 (Java 21/25 runtime, Docker containerized)
-│   ├── Dockerfile          # Multi-stage production Docker build (Eclipse Temurin 21)
-│   ├── src/main/java/com/aquascope/
-│   │   ├── config/         # CORS, Security, and Dynamic JDBC Database configuration
-│   │   ├── controller/     # REST controllers (Auth, Sites, Samples, Analysis, Evidence, Reviews, Devices, Dashboard, Reports, Health)
-│   │   ├── dto/            # Standardized API response records and payloads
-│   │   ├── entity/         # Domain entities (Users, Sites, WaterSamples, Analyses, Evidence, Reviews, Devices, SensorReadings)
-│   │   ├── exception/      # Centralized exception handling
-│   │   ├── repository/     # Spring Data JPA repositories
-│   │   ├── security/       # JWT token authentication and role-based access control
-│   │   └── service/        # Scientific workflow and business logic services
-│   ├── src/main/resources/
-│   │   ├── application.yml # Production/dev configuration & datasource bindings
-│   │   └── db/migration/   # Flyway SQL migrations:
-│   │       ├── V1__initial_schema.sql       # 11 core scientific schema tables
-│   │       └── V2__seed_initial_users.sql   # Seeded role-based user accounts
-│   └── src/test/           # JUnit 5 & Mockito integration tests
-├── frontend/               # React 19 + TypeScript + Vite + Tailwind CSS
-│   ├── vercel.json         # Production SPA route rewrite configuration
-│   ├── src/
-│   │   ├── components/     # Layout, Navigation, Header with live health probe, ProtectedRoute
-│   │   ├── context/        # AuthContext for JWT and role-based permissions
-│   │   ├── pages/          # Dashboard, Locations, Samples, Analysis, Devices, Audit, Analytics, Reports, Settings
-│   │   ├── services/       # Axios API client (/api/v1) with Bearer token interceptor
-│   │   └── types/          # Strict TypeScript contract interfaces matching backend DTOs
-└── render.yaml             # Render Blueprint definition (Managed PostgreSQL + Web Service Docker + Persistent Disk)
+[Vercel Free Tier]
+   └─ React 19 + TypeScript + Vite SPA
+         │  (HTTPS / REST)
+         ▼
+[Render Free Web Service]
+   └─ Spring Boot 3.4.3 Docker Container
+         │
+         ├─── (JDBC over TLS / HikariCP) ───► [Neon Serverless PostgreSQL Free Tier]
+         │                                       - Scale-to-zero supported (Hikari idle evictions)
+         │                                       - Flyway migrations: V1, V2, V3
+         │                                       - SSL enforced (`sslmode=require`)
+         │
+         └─── (S3-Compatible API) ──────────► [Cloudflare R2 Standard Object Storage]
+                                                 - 10GB free tier storage
+                                                 - Private bucket (`aquascope-evidence`)
+                                                 - SHA-256 checksum & MIME signature checks
+                                                 - Zero egress fees
+```
+
+### Free-Tier Limits & Specifications
+
+| Provider | Service | Free Tier Limits | AQUASCOPE Optimization |
+|---|---|---|---|
+| **Render** | Web Service | 512MB RAM, 0.1 CPU, spins down after 15m idle | Health-check endpoint `/api/v1/health` with fast cold-start |
+| **Neon** | Serverless PostgreSQL | 0.5 GiB storage, scales to zero when inactive | Hikari `minimumIdle=0`, `connectionTimeout=30s`, `idleTimeout=60s` for smooth suspend/resume |
+| **Cloudflare** | R2 Object Storage | 10 GB storage, 1M Class A ops/mo, 10M Class B ops/mo, **0$ egress** | Private bucket, streamed authenticated access, UUID keys |
+| **Vercel** | Frontend Hosting | 100GB bandwidth/mo, unlimited preview deploys | Production-optimized static build (`dist/`) with SPA rewrites |
+
+---
+
+## Database Management & Backup Procedures
+
+### Safe Neon PostgreSQL Backup / Export
+Since Neon free databases scale down when idle, export schemas and scientific data securely using `pg_dump`:
+
+```bash
+# Export full database with schema and data:
+pg_dump "postgres://<user>:<password>@<neon-host>/aquascope?sslmode=require" \
+  --format=custom \
+  --file=aquascope_backup_$(date +%Y%m%d).dump
+
+# Plain SQL data export:
+pg_dump "postgres://<user>:<password>@<neon-host>/aquascope?sslmode=require" \
+  --data-only \
+  --file=aquascope_data_$(date +%Y%m%d).sql
+```
+
+### Database Restoration
+```bash
+pg_restore -d "postgres://<user>:<password>@<neon-host>/aquascope?sslmode=require" \
+  --clean --if-exists aquascope_backup.dump
 ```
 
 ---
 
-## Core Scientific Principles & Data Integrity
+## Required Production Environment Variables
 
-1. **Explicit Data Origin Tracking:** All measurements and observations are strictly categorized (`MANUAL`, `DEVICE`, `SIMULATED`). Simulated values are never conflated with real experimental measurements.
-2. **Spectroscopic Verification:** Physical particle counts (microscopy observations) are clearly distinguished from verified polymer identifications (FTIR, Raman spectroscopy).
-3. **Sensor Demarcation:** Physical environmental parameters (pH, turbidity, dissolved oxygen, temperature) recorded by deployed field sensors are kept separate from laboratory microplastic analysis.
-4. **Peer Review Audit Trail:** Analyses require formal peer review (approval or rejection with reviewer rationale and immutable timestamps) before being finalized for reporting.
+### Render Backend Service:
+Configure these environment variables in your Render Web Service settings:
 
----
+| Variable | Description | Example / Notes |
+|---|---|---|
+| `SPRING_PROFILES_ACTIVE` | Active Spring profile | `prod` |
+| `SPRING_DATASOURCE_URL` | Neon JDBC Connection String | `jdbc:postgresql://ep-xyz.us-east-2.aws.neon.tech/aquascope?sslmode=require` |
+| `SPRING_DATASOURCE_USERNAME` | Neon Database User | `aquascope_owner` |
+| `SPRING_DATASOURCE_PASSWORD` | Neon Database Password | *(from Neon console)* |
+| `JWT_SECRET` | Cryptographic secret for signing JWTs | *(Auto-generated by Render blueprint)* |
+| `CORS_ALLOWED_ORIGINS` | Permitted frontend origin | `https://aquascope.vercel.app` |
+| `R2_ENDPOINT` | Cloudflare R2 S3 Endpoint | `https://<account-id>.r2.cloudflarestorage.com` |
+| `R2_BUCKET` | Cloudflare R2 Private Bucket | `aquascope-evidence` |
+| `R2_ACCESS_KEY_ID` | Cloudflare R2 Token Access Key ID | *(from Cloudflare R2 dashboard)* |
+| `R2_SECRET_ACCESS_KEY` | Cloudflare R2 Token Secret Key | *(from Cloudflare R2 dashboard)* |
+| `R2_REGION` | Cloudflare S3 Region | `auto` |
 
-## Technology Stack
-
-- **Backend:** Java 21/25 (Spring Boot 3.4.3, Spring Web, Spring Data JPA, Hibernate, Flyway, JWT, Actuator, JUnit 5).
-- **Frontend:** React 19, TypeScript, Vite, Tailwind CSS, Lucide React, React Router 7, Axios, Recharts.
-- **Database:** PostgreSQL 18+ (Production: Render PostgreSQL; Test: in-memory H2 with PostgreSQL compatibility mode).
-- **Deployment:** Render (Backend via Docker & Managed PostgreSQL with 1GB persistent disk for microscopy evidence), Vercel (Frontend SPA).
-
----
-
-## Production Deployment (Render + Vercel)
-
-### 1. Backend & Database (Render Blueprint)
-The repository contains `render.yaml` declaring:
-- **`aquascope-db`**: Free-tier managed PostgreSQL instance.
-- **`aquascope-backend`**: Dockerized Spring Boot service built via `backend/Dockerfile` with persistent disk mounted at `/var/data/aquascope/uploads` for evidence images.
-- Automatic conversion from Render's `postgres://` connection string to JDBC `jdbc:postgresql://` format via `DatabaseConfig`.
-- Health check path set to `/api/v1/health`.
-
-### 2. Frontend (Vercel)
-- Root directory: `frontend`
-- Build command: `npm run build`
-- Output directory: `dist`
-- Configured environment variable: `VITE_API_BASE_URL` pointing to `https://<backend-service>.onrender.com/api/v1`.
-- SPA rewrites handled by `frontend/vercel.json`.
+### Vercel Frontend Service:
+| Variable | Description | Value |
+|---|---|---|
+| `VITE_API_BASE_URL` | Production Backend API URL | `https://<your-service>.onrender.com/api/v1` |
 
 ---
 
 ## Local Development & Testing Instructions
 
-### 1. Database Initialization
-```bash
-psql -U postgres -h localhost -c "CREATE DATABASE aquascope;"
-```
+### 1. Database Migrations
+Migrations are managed automatically by Flyway upon application boot:
+- `V1__initial_schema.sql`: 11 core tables (users, sites, samples, analyses, observations, devices, logs).
+- `V2__seed_initial_users.sql`: Seeded role accounts with BCrypt-hashed passwords.
+- `V3__evidence_checksum_and_storage_key.sql`: Schema enhancement for Cloudflare R2 object keys and SHA-256 integrity checksums.
 
 ### 2. Run Backend Tests
 ```powershell
 cd backend
 .\mvnw.cmd clean test
 ```
-*Executes unit and scientific workflow integration tests covering authentication, RBAC, sample creation, evidence handling, and reviews.*
 
-### 3. Run Backend Locally
-```powershell
-cd backend
-$env:SPRING_DATASOURCE_PASSWORD="your_password"
-.\mvnw.cmd spring-boot:run
-```
-
-### 4. Run Frontend Locally
-```powershell
-cd frontend
-npm install
-npm run dev
-```
-
-### 5. Frontend Production Build Verification
+### 3. Build Frontend Production Artifacts
 ```powershell
 cd frontend
 npm run build

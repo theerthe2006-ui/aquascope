@@ -34,24 +34,29 @@ public class DatabaseConfig {
     public DataSource dataSource() {
         HikariConfig config = new HikariConfig();
         config.setDriverClassName(driverClassName);
-        config.setMaximumPoolSize(10);
-        config.setMinimumIdle(2);
-        config.setIdleTimeout(300000);
-        config.setConnectionTimeout(20000);
+
+        // Neon Serverless PostgreSQL Hikari optimizations
+        // Neon scales to zero when idle; avoid keeping dead idle connections and support smooth reconnect
+        config.setMaximumPoolSize(5);
+        config.setMinimumIdle(0); // Allow dropping all idle connections so Neon can sleep cleanly
+        config.setIdleTimeout(60000); // 1 minute idle timeout before evicting connection
+        config.setMaxLifetime(300000); // 5 minutes max lifetime to cycle connections
+        config.setConnectionTimeout(30000); // 30s timeout for cold start / wake-up from scale-to-zero
+        config.setValidationTimeout(5000); // 5s connection validation check
+        config.setConnectionTestQuery("SELECT 1");
 
         String jdbcUrl = rawDatasourceUrl;
         String username = rawUsername;
         String password = rawPassword;
 
-        // Render provides DATABASE_URL or connectionString in format: postgres://user:password@host:port/dbname
-        // or postgresql://user:password@host:port/dbname
+        // Parse postgres:// or postgresql:// (Neon / Render connection strings)
         if (rawDatasourceUrl != null && (rawDatasourceUrl.startsWith("postgres://") || rawDatasourceUrl.startsWith("postgresql://"))) {
             try {
-                log.info("Converting standard PostgreSQL URI to JDBC URL for Spring Boot compatibility");
+                log.info("Parsing PostgreSQL URI format for JDBC compatibility");
                 URI uri = new URI(rawDatasourceUrl.replace("postgresql://", "http://").replace("postgres://", "http://"));
                 String host = uri.getHost();
                 int port = uri.getPort() == -1 ? 5432 : uri.getPort();
-                String path = uri.getPath(); // /dbname
+                String path = uri.getPath();
                 String dbName = (path != null && path.length() > 1) ? path.substring(1) : "aquascope";
 
                 if (uri.getUserInfo() != null) {
@@ -64,12 +69,22 @@ public class DatabaseConfig {
 
                 String query = uri.getQuery();
                 jdbcUrl = "jdbc:postgresql://" + host + ":" + port + "/" + dbName;
-                if (query != null && !query.isEmpty()) {
+                
+                // Neon requires SSL
+                if (query == null || !query.contains("sslmode=")) {
+                    jdbcUrl += "?sslmode=require";
+                } else {
                     jdbcUrl += "?" + query;
                 }
-                log.info("JDBC URL successfully mapped to: jdbc:postgresql://{}:{}/{}", host, port, dbName);
+
+                log.info("Neon PostgreSQL JDBC URL successfully configured for host: {}", host);
             } catch (Exception e) {
-                log.error("Failed to parse postgres URL format; falling back to direct string", e);
+                log.error("Failed to parse PostgreSQL URI string, using raw URL", e);
+            }
+        } else if (jdbcUrl != null && jdbcUrl.startsWith("jdbc:postgresql://") && !jdbcUrl.contains("sslmode=")) {
+            // Ensure sslmode=require for Neon if not already specified
+            if (jdbcUrl.contains("neon.tech")) {
+                jdbcUrl += (jdbcUrl.contains("?") ? "&" : "?") + "sslmode=require";
             }
         }
 

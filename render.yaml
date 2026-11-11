@@ -1,9 +1,3 @@
-databases:
-  - name: aquascope-db
-    databaseName: aquascope
-    user: aquascope_user
-    plan: free
-
 services:
   - type: web
     name: aquascope-backend
@@ -12,20 +6,26 @@ services:
     dockerfilePath: backend/Dockerfile
     plan: free
     healthCheckPath: /api/v1/health
-    disk:
-      name: aquascope-uploads
-      mountPath: /var/data/aquascope/uploads
-      sizeGB: 1
     envVars:
       - key: SPRING_PROFILES_ACTIVE
         value: prod
       - key: SPRING_DATASOURCE_URL
-        fromDatabase:
-          name: aquascope-db
-          property: connectionString
+        sync: false
+      - key: SPRING_DATASOURCE_USERNAME
+        sync: false
+      - key: SPRING_DATASOURCE_PASSWORD
+        sync: false
       - key: JWT_SECRET
         generateValue: true
-      - key: UPLOAD_DIR
-        value: /var/data/aquascope/uploads
       - key: CORS_ALLOWED_ORIGINS
         sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_REGION
+        value: auto

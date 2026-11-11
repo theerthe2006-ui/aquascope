@@ -39,6 +39,12 @@ app:
     expiration-ms: ${JWT_EXPIRATION_MS:86400000} # 24 hours
   upload:
     dir: ${UPLOAD_DIR:./uploads}
+  r2:
+    endpoint: ${R2_ENDPOINT:}
+    bucket: ${R2_BUCKET:aquascope-evidence}
+    access-key-id: ${R2_ACCESS_KEY_ID:}
+    secret-access-key: ${R2_SECRET_ACCESS_KEY:}
+    region: ${R2_REGION:auto}
 
 cors:
   allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:3000}

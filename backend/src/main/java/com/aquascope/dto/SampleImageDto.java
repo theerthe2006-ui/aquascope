@@ -10,6 +10,8 @@ public record SampleImageDto(
     String uploadedByUsername,
     String fileName,
     String storedFilePath,
+    String objectKey,
+    String sha256Checksum,
     String contentType,
     Long fileSizeBytes,
     String imagingModality,
