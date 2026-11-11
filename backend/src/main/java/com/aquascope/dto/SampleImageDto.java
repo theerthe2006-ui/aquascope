@@ -12,6 +12,8 @@ public record SampleImageDto(
     String storedFilePath,
     String objectKey,
     String sha256Checksum,
+    String storageStatus,
+    String storageBackend,
     String contentType,
     Long fileSizeBytes,
     String imagingModality,

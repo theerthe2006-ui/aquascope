@@ -35,6 +35,11 @@ import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
+import javax.imageio.ImageIO;
+import javax.imageio.ImageReader;
+import javax.imageio.stream.ImageInputStream;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.nio.file.Files;
@@ -44,6 +49,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.Iterator;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -64,8 +70,11 @@ public class EvidenceStorageService {
     @Value("${app.r2.bucket:aquascope-evidence}")
     private String r2Bucket;
 
-    @Value("${app.upload.max-size-bytes:20971520}") // Default 20 MB
+    @Value("${app.upload.max-size-bytes:20971520}") // 20 MB max file size
     private long maxFileSizeBytes;
+
+    // Maximum safe dimension to prevent pixel flood / decompression bomb attacks
+    private static final int MAX_IMAGE_DIMENSION = 8192; // 8K max width/height
 
     public EvidenceStorageService(
             @Value("${app.upload.dir:./uploads}") String uploadDir,
@@ -115,15 +124,36 @@ public class EvidenceStorageService {
             throw new RuntimeException("Failed to read evidence file bytes", e);
         }
 
-        // Detect and validate real MIME type using magic numbers (never trust client header)
-        String verifiedContentType = detectAndValidateSignature(fileBytes);
+        // Full structural decode and decompression bomb protection
+        String verifiedContentType = validateAndDecodeImageStructure(fileBytes);
 
         String originalFilename = file.getOriginalFilename();
         if (originalFilename == null || originalFilename.contains("..") || originalFilename.contains("/") || originalFilename.contains("\\")) {
             throw new IllegalArgumentException("Invalid file path or name detected (path traversal prevention).");
         }
 
-        // Determine safe extension based solely on verified MIME type
+        // Verify resource existence and user permissions for the associated sample/analysis
+        String currentUsername = SecurityContextHolder.getContext().getAuthentication().getName();
+        User currentUser = userRepository.findByUsername(currentUsername)
+                .orElseThrow(() -> new ResourceNotFoundException("Authenticated user not found: " + currentUsername));
+
+        WaterSample targetSample = null;
+        if (waterSampleId != null) {
+            targetSample = waterSampleRepository.findById(waterSampleId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Water sample not found with ID: " + waterSampleId));
+            validateSampleModificationAccess(targetSample, currentUser);
+        }
+
+        SampleAnalysis targetAnalysis = null;
+        if (sampleAnalysisId != null) {
+            targetAnalysis = sampleAnalysisRepository.findById(sampleAnalysisId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Sample analysis not found with ID: " + sampleAnalysisId));
+            validateAnalysisModificationAccess(targetAnalysis, currentUser);
+            if (targetSample == null) {
+                targetSample = targetAnalysis.getWaterSample();
+            }
+        }
+
         String extension = switch (verifiedContentType) {
             case "image/jpeg" -> ".jpg";
             case "image/png" -> ".png";
@@ -135,6 +165,7 @@ public class EvidenceStorageService {
         String sha256Checksum = calculateSha256(fileBytes);
 
         boolean isProd = Arrays.asList(env.getActiveProfiles()).contains("prod");
+        String storageBackend = "LOCAL";
 
         if (s3Client != null && r2Bucket != null && !r2Bucket.isBlank()) {
             try {
@@ -147,6 +178,7 @@ public class EvidenceStorageService {
                         .build();
 
                 s3Client.putObject(putRequest, RequestBody.fromBytes(fileBytes));
+                storageBackend = "R2";
             } catch (Exception e) {
                 log.error("Failed to store evidence in Cloudflare R2: {}", e.getMessage(), e);
                 throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Object storage upload failure", e);
@@ -155,7 +187,6 @@ public class EvidenceStorageService {
             if (isProd) {
                 throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Production storage unconfigured: R2 client unavailable.");
             }
-            // Local development fallback
             try {
                 Path targetLocation = this.localFallbackStorageLocation.resolve(objectKey.replace("evidence/", "")).normalize();
                 if (!targetLocation.startsWith(this.localFallbackStorageLocation)) {
@@ -167,10 +198,6 @@ public class EvidenceStorageService {
             }
         }
 
-        String username = SecurityContextHolder.getContext().getAuthentication().getName();
-        User user = userRepository.findByUsername(username)
-                .orElseThrow(() -> new ResourceNotFoundException("Authenticated user not found: " + username));
-
         SampleImages image = new SampleImages();
         image.setFileName(originalFilename);
         image.setStoredFilePath(objectKey);
@@ -181,19 +208,11 @@ public class EvidenceStorageService {
         image.setImagingModality(imagingModality != null ? imagingModality : "BRIGHTFIELD_MICROSCOPY");
         image.setMagnification(magnification);
         image.setDescription(description);
-        image.setUploadedByUser(user);
-
-        if (waterSampleId != null) {
-            WaterSample ws = waterSampleRepository.findById(waterSampleId)
-                    .orElseThrow(() -> new ResourceNotFoundException("Water sample not found: " + waterSampleId));
-            image.setWaterSample(ws);
-        }
-
-        if (sampleAnalysisId != null) {
-            SampleAnalysis sa = sampleAnalysisRepository.findById(sampleAnalysisId)
-                    .orElseThrow(() -> new ResourceNotFoundException("Sample analysis not found: " + sampleAnalysisId));
-            image.setSampleAnalysis(sa);
-        }
+        image.setUploadedByUser(currentUser);
+        image.setWaterSample(targetSample);
+        image.setSampleAnalysis(targetAnalysis);
+        image.setStorageStatus("AVAILABLE");
+        image.setStorageBackend(storageBackend);
 
         SampleImages saved = sampleImagesRepository.save(image);
         return mapToDto(saved);
@@ -203,12 +222,16 @@ public class EvidenceStorageService {
         SampleImages image = sampleImagesRepository.findById(imageId)
                 .orElseThrow(() -> new ResourceNotFoundException("Evidence image not found with ID: " + imageId));
 
-        // Enforce authorization for the requested evidence image
-        validateEvidenceAccess(image);
+        if ("DELETED".equals(image.getStorageStatus())) {
+            throw new ResourceNotFoundException("Evidence image has been permanently deleted.");
+        }
+
+        // Fine-grained resource-level access control
+        validateEvidenceResourceAccess(image);
 
         String key = image.getObjectKey() != null ? image.getObjectKey() : image.getStoredFilePath();
 
-        if (s3Client != null && r2Bucket != null && !r2Bucket.isBlank()) {
+        if ("R2".equals(image.getStorageBackend()) || (s3Client != null && r2Bucket != null && !r2Bucket.isBlank())) {
             try {
                 log.info("Streaming evidence object from Cloudflare R2 bucket: {}, key: {}", r2Bucket, key);
                 GetObjectRequest getRequest = GetObjectRequest.builder()
@@ -232,7 +255,6 @@ public class EvidenceStorageService {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Production storage unconfigured: R2 client unavailable.");
         }
 
-        // Local development fallback
         try {
             Path filePath = this.localFallbackStorageLocation.resolve(key.replace("evidence/", "")).normalize();
             if (!filePath.startsWith(this.localFallbackStorageLocation)) {
@@ -254,46 +276,58 @@ public class EvidenceStorageService {
         SampleImages image = sampleImagesRepository.findById(imageId)
                 .orElseThrow(() -> new ResourceNotFoundException("Evidence image not found with ID: " + imageId));
 
-        validateEvidenceAccess(image);
+        // Enforce deletion permission (Uploader or Admin only)
+        validateEvidenceDeletionAccess(image);
 
         String key = image.getObjectKey() != null ? image.getObjectKey() : image.getStoredFilePath();
 
-        if (s3Client != null && r2Bucket != null && !r2Bucket.isBlank()) {
+        // 1. Mark as PENDING_DELETION first in database to prevent false 'AVAILABLE' status if storage crashes
+        image.setStorageStatus("PENDING_DELETION");
+        sampleImagesRepository.saveAndFlush(image);
+
+        if ("R2".equals(image.getStorageBackend()) || (s3Client != null && r2Bucket != null && !r2Bucket.isBlank())) {
             try {
                 log.info("Deleting evidence object from R2: {}", key);
                 s3Client.deleteObject(DeleteObjectRequest.builder().bucket(r2Bucket).key(key).build());
             } catch (Exception e) {
-                log.error("Failed to delete object from R2: {}. Preserving PostgreSQL metadata.", e.getMessage(), e);
-                // Do not delete database record if R2 deletion fails; preserve metadata and throw error so caller can retry
-                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Failed to delete file from object storage; metadata preserved. Please retry.", e);
+                log.error("Failed to delete object from R2: {}. State marked as PENDING_DELETION for retry.", e.getMessage(), e);
+                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Failed to delete from object storage. Record flagged as PENDING_DELETION.", e);
             }
         } else {
-            boolean isProd = Arrays.asList(env.getActiveProfiles()).contains("prod");
-            if (isProd) {
-                throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Production storage unconfigured: R2 client unavailable.");
-            }
             try {
                 Path filePath = this.localFallbackStorageLocation.resolve(key.replace("evidence/", "")).normalize();
                 Files.deleteIfExists(filePath);
             } catch (IOException e) {
                 log.error("Failed to delete local fallback file: {}", e.getMessage());
-                throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to delete local file; metadata preserved.", e);
+                throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to delete local file. Record flagged as PENDING_DELETION.", e);
             }
         }
 
+        // 2. Object deleted from storage: now mark DELETED or remove record
+        image.setStorageStatus("DELETED");
         sampleImagesRepository.delete(image);
     }
 
     @Transactional(readOnly = true)
     public List<SampleImageDto> getEvidenceByAnalysisId(Long analysisId) {
+        SampleAnalysis analysis = sampleAnalysisRepository.findById(analysisId)
+                .orElseThrow(() -> new ResourceNotFoundException("Sample analysis not found: " + analysisId));
+        validateAnalysisReadAccess(analysis);
+
         return sampleImagesRepository.findBySampleAnalysisId(analysisId).stream()
+                .filter(img -> !"DELETED".equals(img.getStorageStatus()))
                 .map(this::mapToDto)
                 .collect(Collectors.toList());
     }
 
     @Transactional(readOnly = true)
     public List<SampleImageDto> getEvidenceBySampleId(Long sampleId) {
+        WaterSample sample = waterSampleRepository.findById(sampleId)
+                .orElseThrow(() -> new ResourceNotFoundException("Water sample not found: " + sampleId));
+        validateSampleReadAccess(sample);
+
         return sampleImagesRepository.findByWaterSampleId(sampleId).stream()
+                .filter(img -> !"DELETED".equals(img.getStorageStatus()))
                 .map(this::mapToDto)
                 .collect(Collectors.toList());
     }
@@ -302,51 +336,204 @@ public class EvidenceStorageService {
     public SampleImages getImageEntity(Long id) {
         SampleImages image = sampleImagesRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Evidence not found with ID: " + id));
-        validateEvidenceAccess(image);
+        validateEvidenceResourceAccess(image);
         return image;
     }
 
-    private void validateEvidenceAccess(SampleImages image) {
+    // --- Fine-grained Resource Access Control ---
+
+    private void validateEvidenceResourceAccess(SampleImages image) {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         if (auth == null || !auth.isAuthenticated()) {
             throw new AccessDeniedException("Authentication required to access evidence.");
         }
 
-        boolean hasElevatedRole = auth.getAuthorities().stream().anyMatch(a ->
-                a.getAuthority().equals("ROLE_ADMINISTRATOR") ||
-                a.getAuthority().equals("ROLE_LABORATORY_RESEARCHER") ||
-                a.getAuthority().equals("ROLE_REVIEWER") ||
-                a.getAuthority().equals("ROLE_ENVIRONMENTAL_FIELD_OFFICER")
+        String username = auth.getName();
+        boolean isAdmin = auth.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_ADMINISTRATOR"));
+        boolean isReviewer = auth.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_REVIEWER"));
+
+        if (isAdmin || isReviewer) {
+            return; // Admins and Reviewers have legitimate read access to all laboratory evidence
+        }
+
+        // Owner check: If user uploaded this evidence, they have access
+        if (image.getUploadedByUser() != null && image.getUploadedByUser().getUsername().equals(username)) {
+            return;
+        }
+
+        // Associated sample check: Field officer or researcher assigned to sample
+        if (image.getWaterSample() != null) {
+            validateSampleReadAccess(image.getWaterSample());
+            return;
+        }
+
+        throw new AccessDeniedException("Access denied: You do not have permission to view this specific evidence record.");
+    }
+
+    private void validateEvidenceDeletionAccess(SampleImages image) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated()) {
+            throw new AccessDeniedException("Authentication required.");
+        }
+
+        String username = auth.getName();
+        boolean isAdmin = auth.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_ADMINISTRATOR"));
+        if (isAdmin) {
+            return; // Administrators can delete any evidence
+        }
+
+        if (image.getUploadedByUser() != null && image.getUploadedByUser().getUsername().equals(username)) {
+            return; // Original uploader can delete their own evidence
+        }
+
+        throw new AccessDeniedException("Access denied: Only administrators or the original uploader can delete this evidence.");
+    }
+
+    private void validateSampleReadAccess(WaterSample sample) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        String username = auth.getName();
+        boolean isAdminOrReviewer = auth.getAuthorities().stream().anyMatch(a ->
+                a.getAuthority().equals("ROLE_ADMINISTRATOR") || a.getAuthority().equals("ROLE_REVIEWER")
         );
 
-        if (!hasElevatedRole) {
-            throw new AccessDeniedException("Access denied: Insufficient role permissions to view or download scientific evidence.");
+        if (isAdminOrReviewer) {
+            return;
+        }
+
+        // Field officer / researcher associated
+        if (sample.getCollectedByUser() != null && sample.getCollectedByUser().getUsername().equals(username)) {
+            return;
+        }
+
+        // Authorized platform researcher role
+        boolean isResearcher = auth.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_LABORATORY_RESEARCHER"));
+        if (isResearcher) {
+            return;
+        }
+
+        throw new AccessDeniedException("Access denied: You are not authorized to view evidence for this water sample.");
+    }
+
+    private void validateSampleModificationAccess(WaterSample sample, User currentUser) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        boolean isAdmin = auth.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_ADMINISTRATOR"));
+        if (isAdmin) {
+            return;
+        }
+
+        boolean isResearcher = auth.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_LABORATORY_RESEARCHER"));
+        boolean isCollector = sample.getCollectedByUser() != null && sample.getCollectedByUser().getId().equals(currentUser.getId());
+
+        if (!isResearcher && !isCollector) {
+            throw new AccessDeniedException("Access denied: You cannot attach evidence to an unassigned water sample.");
         }
     }
 
-    private String detectAndValidateSignature(byte[] bytes) {
+    private void validateAnalysisReadAccess(SampleAnalysis analysis) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        String username = auth.getName();
+        boolean isAdminOrReviewer = auth.getAuthorities().stream().anyMatch(a ->
+                a.getAuthority().equals("ROLE_ADMINISTRATOR") || a.getAuthority().equals("ROLE_REVIEWER")
+        );
+
+        if (isAdminOrReviewer) {
+            return;
+        }
+
+        if (analysis.getAnalyzedByUser() != null && analysis.getAnalyzedByUser().getUsername().equals(username)) {
+            return;
+        }
+
+        boolean isResearcher = auth.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_LABORATORY_RESEARCHER"));
+        if (isResearcher) {
+            return;
+        }
+
+        throw new AccessDeniedException("Access denied: You are not authorized to inspect this analysis.");
+    }
+
+    private void validateAnalysisModificationAccess(SampleAnalysis analysis, User currentUser) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        boolean isAdmin = auth.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_ADMINISTRATOR"));
+        if (isAdmin) {
+            return;
+        }
+
+        if (analysis.getAnalyzedByUser() != null && analysis.getAnalyzedByUser().getId().equals(currentUser.getId())) {
+            return;
+        }
+
+        throw new AccessDeniedException("Access denied: You cannot attach evidence to another researcher's analysis session.");
+    }
+
+    // --- Structural Image Decoding & Decompression Bomb Protection ---
+
+    private String validateAndDecodeImageStructure(byte[] bytes) {
         if (bytes == null || bytes.length < 12) {
-            throw new IllegalArgumentException("Unsupported or corrupt file format: File size too small for header detection.");
+            throw new IllegalArgumentException("Unsupported or corrupt file format: File too small to contain valid image headers.");
         }
 
-        // JPEG Magic Number: FF D8 FF
+        // 1. Initial signature validation
+        String detectedFormat = null;
         if ((bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xD8 && (bytes[2] & 0xFF) == 0xFF) {
-            return "image/jpeg";
+            detectedFormat = "image/jpeg";
+        } else if ((bytes[0] & 0xFF) == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 &&
+                bytes[4] == 0x0D && bytes[5] == 0x0A && bytes[6] == 0x1A && bytes[7] == 0x0A) {
+            detectedFormat = "image/png";
+        } else if (bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F' &&
+                bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P') {
+            detectedFormat = "image/webp";
         }
 
-        // PNG Magic Number: 89 50 4E 47 0D 0A 1A 0A
-        if ((bytes[0] & 0xFF) == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 &&
-            bytes[4] == 0x0D && bytes[5] == 0x0A && bytes[6] == 0x1A && bytes[7] == 0x0A) {
-            return "image/png";
+        if (detectedFormat == null) {
+            throw new IllegalArgumentException("Unsupported image format. Allowed: JPEG, PNG, and WebP.");
         }
 
-        // WebP Magic Number: RIFF (bytes 0-3) and WEBP (bytes 8-11)
-        if (bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F' &&
-            bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P') {
-            return "image/webp";
+        // 2. Structural decoding for JPEG and PNG using ImageIO
+        if ("image/jpeg".equals(detectedFormat) || "image/png".equals(detectedFormat)) {
+            try (ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
+                 ImageInputStream iis = ImageIO.createImageInputStream(bais)) {
+
+                Iterator<ImageReader> readers = ImageIO.getImageReaders(iis);
+                if (!readers.hasNext()) {
+                    throw new IllegalArgumentException("Malformed or unreadable image stream: No decoder found.");
+                }
+
+                ImageReader reader = readers.next();
+                reader.setInput(iis, true, true);
+
+                int width = reader.getWidth(0);
+                int height = reader.getHeight(0);
+
+                // Protect against decompression bombs (pixel flood)
+                if (width <= 0 || height <= 0 || width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) {
+                    throw new IllegalArgumentException(String.format(
+                            "Image dimensions (%dx%d) exceed maximum safety limit of %dx%d (decompression bomb protection).",
+                            width, height, MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION
+                    ));
+                }
+
+                // Verify image decodes properly without throwing exception
+                BufferedImage image = reader.read(0);
+                if (image == null) {
+                    throw new IllegalArgumentException("Corrupt image data: Failed to decode raster frame.");
+                }
+
+            } catch (Exception e) {
+                if (e instanceof IllegalArgumentException) {
+                    throw (IllegalArgumentException) e;
+                }
+                throw new IllegalArgumentException("Corrupted or malformed image file: " + e.getMessage(), e);
+            }
+        } else if ("image/webp".equals(detectedFormat)) {
+            // WebP header inspection: verify container size field consistency
+            int riffLength = ((bytes[7] & 0xFF) << 24) | ((bytes[6] & 0xFF) << 16) | ((bytes[5] & 0xFF) << 8) | (bytes[4] & 0xFF);
+            if (riffLength <= 0 || bytes.length < riffLength + 8) {
+                throw new IllegalArgumentException("Truncated or malformed WebP image stream.");
+            }
         }
 
-        throw new IllegalArgumentException("Unsupported file format. Only verified JPEG, PNG, and WebP images are permitted.");
+        return detectedFormat;
     }
 
     private String calculateSha256(byte[] data) {
@@ -370,6 +557,8 @@ public class EvidenceStorageService {
                 entity.getStoredFilePath(),
                 entity.getObjectKey(),
                 entity.getSha256Checksum(),
+                entity.getStorageStatus(),
+                entity.getStorageBackend(),
                 entity.getContentType(),
                 entity.getFileSizeBytes(),
                 entity.getImagingModality(),

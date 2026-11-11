@@ -35,6 +35,12 @@ public class SampleImages {
     @Column(name = "sha256_checksum", length = 64)
     private String sha256Checksum;
 
+    @Column(name = "storage_status", nullable = false, length = 50)
+    private String storageStatus = "AVAILABLE"; // AVAILABLE, PENDING_DELETION, DELETED, STORAGE_ERROR
+
+    @Column(name = "storage_backend", nullable = false, length = 50)
+    private String storageBackend = "LOCAL"; // LOCAL, R2
+
     @Column(name = "content_type", nullable = false, length = 100)
     private String contentType;
 
@@ -93,6 +99,12 @@ public class SampleImages {
 
     public String getSha256Checksum() { return sha256Checksum; }
     public void setSha256Checksum(String sha256Checksum) { this.sha256Checksum = sha256Checksum; }
+
+    public String getStorageStatus() { return storageStatus; }
+    public void setStorageStatus(String storageStatus) { this.storageStatus = storageStatus; }
+
+    public String getStorageBackend() { return storageBackend; }
+    public void setStorageBackend(String storageBackend) { this.storageBackend = storageBackend; }
 
     public Instant getCreatedAt() { return createdAt; }
 }

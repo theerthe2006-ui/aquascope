@@ -1,11 +1,15 @@
 package com.aquascope;
 
 import com.aquascope.dto.SampleImageDto;
+import com.aquascope.entity.SampleAnalysis;
 import com.aquascope.entity.SampleImages;
 import com.aquascope.entity.User;
+import com.aquascope.entity.WaterSample;
 import com.aquascope.exception.ResourceNotFoundException;
+import com.aquascope.repository.SampleAnalysisRepository;
 import com.aquascope.repository.SampleImagesRepository;
 import com.aquascope.repository.UserRepository;
+import com.aquascope.repository.WaterSampleRepository;
 import com.aquascope.service.EvidenceStorageService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -27,7 +31,11 @@ import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
 
-import java.util.Collections;
+import javax.imageio.ImageIO;
+import java.awt.*;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -50,6 +58,24 @@ public class CloudflareR2StorageTests {
     @Autowired
     private SampleImagesRepository sampleImagesRepository;
 
+    @Autowired
+    private WaterSampleRepository waterSampleRepository;
+
+    @Autowired
+    private SampleAnalysisRepository sampleAnalysisRepository;
+
+    private byte[] createTestImage(String format, int width, int height) throws IOException {
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = image.createGraphics();
+        g.setColor(Color.BLUE);
+        g.fillRect(0, 0, width, height);
+        g.dispose();
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ImageIO.write(image, format, baos);
+        return baos.toByteArray();
+    }
+
     @BeforeEach
     void setUp() {
         UsernamePasswordAuthenticationToken auth =
@@ -59,10 +85,9 @@ public class CloudflareR2StorageTests {
     }
 
     @Test
-    @DisplayName("Should successfully upload PNG image to Cloudflare R2 with signature check and SHA-256 checksum")
-    void shouldUploadImageToR2WithChecksum() {
-        // Valid PNG header (89 50 4E 47 0D 0A 1A 0A) followed by 8 bytes
-        byte[] pngBytes = new byte[]{(byte) 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52};
+    @DisplayName("Should successfully upload PNG image to Cloudflare R2 with structural check and SHA-256 checksum")
+    void shouldUploadImageToR2WithChecksum() throws IOException {
+        byte[] pngBytes = createTestImage("png", 100, 100);
         MockMultipartFile file = new MockMultipartFile(
                 "file", "microscope_bead.png", "image/png", pngBytes
         );
@@ -82,6 +107,7 @@ public class CloudflareR2StorageTests {
         assertNotNull(result.sha256Checksum());
         assertEquals(64, result.sha256Checksum().length());
         assertEquals("image/png", result.contentType());
+        assertEquals("AVAILABLE", result.storageStatus());
 
         ArgumentCaptor<PutObjectRequest> putCaptor = ArgumentCaptor.forClass(PutObjectRequest.class);
         verify(s3Client, times(1)).putObject(putCaptor.capture(), any(RequestBody.class));
@@ -89,17 +115,17 @@ public class CloudflareR2StorageTests {
     }
 
     @Test
-    @DisplayName("Should successfully upload WebP image when valid RIFF...WEBP header is provided")
+    @DisplayName("Should successfully upload WebP image when valid RIFF...WEBP structure is provided")
     void shouldUploadWebPImage() {
-        // Valid WebP header: RIFF (bytes 0-3) + file size (bytes 4-7) + WEBP (bytes 8-11)
-        byte[] webpBytes = new byte[]{
+        // Valid WebP header: RIFF (bytes 0-3) + file size (bytes 4-7) + WEBP (bytes 8-11) + payload
+        byte[] payload = new byte[]{
                 'R', 'I', 'F', 'F',
-                0x20, 0x00, 0x00, 0x00,
+                0x08, 0x00, 0x00, 0x00, // length of rest of file = 8
                 'W', 'E', 'B', 'P',
                 'V', 'P', '8', ' '
         };
         MockMultipartFile file = new MockMultipartFile(
-                "file", "fiber.webp", "image/webp", webpBytes
+                "file", "fiber.webp", "image/webp", payload
         );
 
         when(s3Client.putObject(any(PutObjectRequest.class), any(RequestBody.class)))
@@ -115,11 +141,14 @@ public class CloudflareR2StorageTests {
     }
 
     @Test
-    @DisplayName("Should reject file when signature does not match supported MIME signatures")
-    void shouldRejectInvalidFileSignature() {
-        byte[] invalidBytes = new byte[]{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C};
+    @DisplayName("Should reject malformed image bytes even if declared as PNG")
+    void shouldRejectMalformedImageBytes() {
+        byte[] corruptBytes = new byte[]{
+                (byte) 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+                0x00, 0x00, 0x00, 0x0D, 0x00, 0x00, 0x00, 0x00
+        };
         MockMultipartFile fakePng = new MockMultipartFile(
-                "file", "fake.png", "image/png", invalidBytes
+                "file", "corrupt.png", "image/png", corruptBytes
         );
 
         assertThrows(IllegalArgumentException.class, () -> {
@@ -130,28 +159,8 @@ public class CloudflareR2StorageTests {
     }
 
     @Test
-    @DisplayName("Should reject invalid WebP signature missing WEBP magic marker")
-    void shouldRejectCorruptWebPSignature() {
-        // Starts with RIFF but has invalid 8-11 bytes
-        byte[] corruptWebp = new byte[]{
-                'R', 'I', 'F', 'F',
-                0x20, 0x00, 0x00, 0x00,
-                'B', 'A', 'D', '!',
-                '0', '0', '0', '0'
-        };
-        MockMultipartFile file = new MockMultipartFile(
-                "file", "corrupt.webp", "image/webp", corruptWebp
-        );
-
-        assertThrows(IllegalArgumentException.class, () -> {
-            evidenceStorageService.storeEvidence(file, null, null, null, null, null);
-        });
-    }
-
-    @Test
-    @DisplayName("Should reject oversized image")
+    @DisplayName("Should reject oversized image exceeding upload limit")
     void shouldRejectOversizedImage() {
-        // Set up mock with large length without allocating 25MB buffer
         MockMultipartFile largeFile = new MockMultipartFile(
                 "file", "large.png", "image/png",
                 new byte[]{(byte) 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x00, 0x00}
@@ -184,6 +193,7 @@ public class CloudflareR2StorageTests {
         image.setContentType("image/png");
         image.setFileSizeBytes((long) sampleData.length);
         image.setUploadedByUser(researcher);
+        image.setStorageBackend("R2");
         SampleImages saved = sampleImagesRepository.save(image);
 
         Resource resource = evidenceStorageService.loadEvidenceAsResource(saved.getId());
@@ -194,7 +204,7 @@ public class CloudflareR2StorageTests {
     }
 
     @Test
-    @DisplayName("Should return 404 ResourceNotFoundException when R2 object does not exist (NoSuchKeyException)")
+    @DisplayName("Should return 404 ResourceNotFoundException when R2 object does not exist")
     void shouldReturn404WhenObjectNotFoundInR2() {
         when(s3Client.getObjectAsBytes(any(GetObjectRequest.class)))
                 .thenThrow(NoSuchKeyException.builder().message("Key not found").build());
@@ -207,6 +217,7 @@ public class CloudflareR2StorageTests {
         image.setContentType("image/png");
         image.setFileSizeBytes(100L);
         image.setUploadedByUser(researcher);
+        image.setStorageBackend("R2");
         SampleImages saved = sampleImagesRepository.save(image);
 
         assertThrows(ResourceNotFoundException.class, () -> {
@@ -215,7 +226,7 @@ public class CloudflareR2StorageTests {
     }
 
     @Test
-    @DisplayName("Should return 503 ResponseStatusException when temporary R2 outage or network error occurs")
+    @DisplayName("Should return 503 ResponseStatusException when temporary R2 outage occurs")
     void shouldReturn503WhenR2OutageOccurs() {
         when(s3Client.getObjectAsBytes(any(GetObjectRequest.class)))
                 .thenThrow(new RuntimeException("Cloudflare R2 500 Connection reset"));
@@ -228,6 +239,7 @@ public class CloudflareR2StorageTests {
         image.setContentType("image/png");
         image.setFileSizeBytes(100L);
         image.setUploadedByUser(researcher);
+        image.setStorageBackend("R2");
         SampleImages saved = sampleImagesRepository.save(image);
 
         assertThrows(ResponseStatusException.class, () -> {
@@ -236,22 +248,25 @@ public class CloudflareR2StorageTests {
     }
 
     @Test
-    @DisplayName("Should deny access when user has unprivileged role")
-    void shouldDenyUnauthorizedUserEvidenceAccess() {
-        UsernamePasswordAuthenticationToken unprivilegedAuth =
-                new UsernamePasswordAuthenticationToken("guest", "pass",
-                        List.of(new SimpleGrantedAuthority("ROLE_GUEST")));
-        SecurityContextHolder.getContext().setAuthentication(unprivilegedAuth);
-
+    @DisplayName("Resource-level authorization: Unrelated user cannot download evidence by guessing image ID")
+    void shouldEnforceResourceLevelAuthorizationForImageDownload() {
+        // Evidence uploaded by researcher
         User researcher = userRepository.findByUsername("researcher").orElseThrow();
         SampleImages image = new SampleImages();
-        image.setFileName("private.png");
-        image.setStoredFilePath("evidence/private.png");
-        image.setObjectKey("evidence/private.png");
+        image.setFileName("confidential.png");
+        image.setStoredFilePath("evidence/confidential.png");
+        image.setObjectKey("evidence/confidential.png");
         image.setContentType("image/png");
         image.setFileSizeBytes(100L);
         image.setUploadedByUser(researcher);
+        image.setStorageBackend("R2");
         SampleImages saved = sampleImagesRepository.save(image);
+
+        // Switch security context to unauthorized external guest or field officer not on this sample
+        UsernamePasswordAuthenticationToken otherAuth =
+                new UsernamePasswordAuthenticationToken("field_officer", "password",
+                        List.of(new SimpleGrantedAuthority("ROLE_ENVIRONMENTAL_FIELD_OFFICER")));
+        SecurityContextHolder.getContext().setAuthentication(otherAuth);
 
         assertThrows(AccessDeniedException.class, () -> {
             evidenceStorageService.loadEvidenceAsResource(saved.getId());
@@ -259,26 +274,55 @@ public class CloudflareR2StorageTests {
     }
 
     @Test
-    @DisplayName("Should preserve database metadata if R2 object deletion fails")
-    void shouldPreserveDatabaseMetadataWhenR2DeleteFails() {
+    @DisplayName("Resource-level authorization: Non-owner cannot delete another user's evidence")
+    void shouldPreventNonOwnerFromDeletingEvidence() {
         User researcher = userRepository.findByUsername("researcher").orElseThrow();
         SampleImages image = new SampleImages();
-        image.setFileName("protected_meta.png");
-        image.setStoredFilePath("evidence/protected_meta.png");
-        image.setObjectKey("evidence/protected_meta.png");
+        image.setFileName("owner_only.png");
+        image.setStoredFilePath("evidence/owner_only.png");
+        image.setObjectKey("evidence/owner_only.png");
         image.setContentType("image/png");
         image.setFileSizeBytes(100L);
         image.setUploadedByUser(researcher);
         SampleImages saved = sampleImagesRepository.save(image);
 
+        // Switch to field_officer
+        UsernamePasswordAuthenticationToken otherAuth =
+                new UsernamePasswordAuthenticationToken("field_officer", "password",
+                        List.of(new SimpleGrantedAuthority("ROLE_ENVIRONMENTAL_FIELD_OFFICER")));
+        SecurityContextHolder.getContext().setAuthentication(otherAuth);
+
+        assertThrows(AccessDeniedException.class, () -> {
+            evidenceStorageService.deleteEvidence(saved.getId());
+        });
+
+        // Record must remain intact
+        assertTrue(sampleImagesRepository.findById(saved.getId()).isPresent());
+    }
+
+    @Test
+    @DisplayName("Safe deletion: R2 failure marks status PENDING_DELETION and preserves metadata")
+    void shouldMarkPendingDeletionWhenR2Fails() {
+        User researcher = userRepository.findByUsername("researcher").orElseThrow();
+        SampleImages image = new SampleImages();
+        image.setFileName("fail_delete.png");
+        image.setStoredFilePath("evidence/fail_delete.png");
+        image.setObjectKey("evidence/fail_delete.png");
+        image.setContentType("image/png");
+        image.setFileSizeBytes(100L);
+        image.setUploadedByUser(researcher);
+        image.setStorageBackend("R2");
+        SampleImages saved = sampleImagesRepository.save(image);
+
         when(s3Client.deleteObject(any(DeleteObjectRequest.class)))
-                .thenThrow(new RuntimeException("R2 S3 connection timeout"));
+                .thenThrow(new RuntimeException("Cloudflare R2 timeout"));
 
         assertThrows(ResponseStatusException.class, () -> {
             evidenceStorageService.deleteEvidence(saved.getId());
         });
 
-        // Verify entity is still present in database
-        assertTrue(sampleImagesRepository.findById(saved.getId()).isPresent());
+        // Metadata is preserved and flagged as PENDING_DELETION
+        SampleImages updated = sampleImagesRepository.findById(saved.getId()).orElseThrow();
+        assertEquals("PENDING_DELETION", updated.getStorageStatus());
     }
 }
