@@ -75,8 +75,8 @@ export const Header: React.FC = () => {
           {health && (
             <div className="ml-2 pl-2 border-l border-slate-800 flex items-center gap-1.5">
               <Database className="w-3 h-3 text-slate-400" />
-              <span className={health.database.connected ? 'text-emerald-400' : 'text-rose-400'}>
-                {health.database.databaseType}
+              <span className="text-emerald-400">
+                {health.database}
               </span>
             </div>
           )}
