@@ -2,11 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { dashboardApi, healthApi } from '../services/api';
 import type { DashboardStatsDto, HealthResponse } from '../types/api';
 import { 
-  Activity, 
   Database, 
   Server, 
   ShieldCheck, 
-  Layers, 
   AlertCircle,
   FlaskConical,
   MapPin,

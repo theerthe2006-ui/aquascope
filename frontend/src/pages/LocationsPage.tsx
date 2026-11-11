@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { siteApi } from '../services/api';
 import type { MonitoringSiteDto, WaterSourceCategory } from '../types/api';
-import { MapPin, Plus, Search, Filter, AlertCircle, CheckCircle2, X } from 'lucide-react';
+import { MapPin, Plus, Search, AlertCircle, CheckCircle2, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 export const LocationsPage: React.FC = () => {

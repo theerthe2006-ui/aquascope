@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { sampleApi, siteApi } from '../services/api';
-import type { WaterSampleDto, MonitoringSiteDto, DataOrigin, SampleStatus } from '../types/api';
-import { FlaskConical, Search, Filter, Plus, AlertCircle, X, ShieldAlert } from 'lucide-react';
+import type { WaterSampleDto, MonitoringSiteDto, DataOrigin } from '../types/api';
+import { FlaskConical, Search, Plus, AlertCircle, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 export const SamplesPage: React.FC = () => {

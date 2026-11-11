@@ -7,7 +7,12 @@ import type {
   MonitoringSiteDto, 
   WaterSampleDto, 
   SampleAnalysisDto, 
+  ParticleObservationDto,
   AnalysisReviewDto, 
+  SampleImageDto,
+  DeviceDto,
+  SensorReadingDto,
+  AuditLogDto,
   DashboardStatsDto 
 } from '../types/api';
 
@@ -59,6 +64,18 @@ export const authApi = {
     const response = await api.get<ApiResponse<UserDto>>('/auth/me');
     return response.data;
   },
+  getAllUsers: async (): Promise<ApiResponse<UserDto[]>> => {
+    const response = await api.get<ApiResponse<UserDto[]>>('/auth/users');
+    return response.data;
+  },
+  registerUser: async (user: any): Promise<ApiResponse<UserDto>> => {
+    const response = await api.post<ApiResponse<UserDto>>('/auth/users', user);
+    return response.data;
+  },
+  toggleUserStatus: async (id: number): Promise<ApiResponse<UserDto>> => {
+    const response = await api.patch<ApiResponse<UserDto>>(`/auth/users/${id}/status`);
+    return response.data;
+  },
 };
 
 export const dashboardApi = {
@@ -107,8 +124,16 @@ export const analysisApi = {
     const response = await api.get<ApiResponse<SampleAnalysisDto[]>>('/analyses');
     return response.data;
   },
+  getById: async (id: number): Promise<ApiResponse<SampleAnalysisDto>> => {
+    const response = await api.get<ApiResponse<SampleAnalysisDto>>(`/analyses/${id}`);
+    return response.data;
+  },
   create: async (analysis: Partial<SampleAnalysisDto>): Promise<ApiResponse<SampleAnalysisDto>> => {
     const response = await api.post<ApiResponse<SampleAnalysisDto>>('/analyses', analysis);
+    return response.data;
+  },
+  addObservation: async (analysisId: number, obs: Partial<ParticleObservationDto>): Promise<ApiResponse<ParticleObservationDto>> => {
+    const response = await api.post<ApiResponse<ParticleObservationDto>>(`/analyses/${analysisId}/observations`, obs);
     return response.data;
   },
   submitForReview: async (id: number): Promise<ApiResponse<SampleAnalysisDto>> => {
@@ -120,6 +145,70 @@ export const analysisApi = {
 export const reviewApi = {
   submitReview: async (analysisId: number, review: Partial<AnalysisReviewDto>): Promise<ApiResponse<AnalysisReviewDto>> => {
     const response = await api.post<ApiResponse<AnalysisReviewDto>>(`/reviews/analysis/${analysisId}`, review);
+    return response.data;
+  },
+};
+
+export const deviceApi = {
+  getAll: async (): Promise<ApiResponse<DeviceDto[]>> => {
+    const response = await api.get<ApiResponse<DeviceDto[]>>('/devices');
+    return response.data;
+  },
+  create: async (device: Partial<DeviceDto>): Promise<ApiResponse<DeviceDto>> => {
+    const response = await api.post<ApiResponse<DeviceDto>>('/devices', device);
+    return response.data;
+  },
+  update: async (id: number, device: Partial<DeviceDto>): Promise<ApiResponse<DeviceDto>> => {
+    const response = await api.put<ApiResponse<DeviceDto>>(`/devices/${id}`, device);
+    return response.data;
+  },
+  getReadings: async (deviceId: number): Promise<ApiResponse<SensorReadingDto[]>> => {
+    const response = await api.get<ApiResponse<SensorReadingDto[]>>(`/devices/${deviceId}/readings`);
+    return response.data;
+  },
+  recordReading: async (reading: Partial<SensorReadingDto>): Promise<ApiResponse<SensorReadingDto>> => {
+    const response = await api.post<ApiResponse<SensorReadingDto>>('/devices/readings', reading);
+    return response.data;
+  },
+};
+
+export const evidenceApi = {
+  getByAnalysis: async (analysisId: number): Promise<ApiResponse<SampleImageDto[]>> => {
+    const response = await api.get<ApiResponse<SampleImageDto[]>>(`/evidence/analysis/${analysisId}`);
+    return response.data;
+  },
+  getBySample: async (sampleId: number): Promise<ApiResponse<SampleImageDto[]>> => {
+    const response = await api.get<ApiResponse<SampleImageDto[]>>(`/evidence/sample/${sampleId}`);
+    return response.data;
+  },
+  upload: async (formData: FormData): Promise<ApiResponse<SampleImageDto>> => {
+    const response = await api.post<ApiResponse<SampleImageDto>>('/evidence', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    return response.data;
+  },
+  getDownloadUrl: (id: number): string => {
+    const base = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1';
+    return `${base}/evidence/${id}/download`;
+  },
+};
+
+export const auditApi = {
+  getRecent: async (limit: number = 20): Promise<ApiResponse<AuditLogDto[]>> => {
+    const response = await api.get<ApiResponse<AuditLogDto[]>>(`/audit/recent?limit=${limit}`);
+    return response.data;
+  },
+};
+
+export const reportApi = {
+  downloadCsv: async (): Promise<Blob> => {
+    const response = await api.get('/reports/csv', { responseType: 'blob' });
+    return response.data;
+  },
+  downloadPdf: async (): Promise<Blob> => {
+    const response = await api.get('/reports/pdf', { responseType: 'blob' });
     return response.data;
   },
 };

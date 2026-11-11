@@ -75,4 +75,5 @@ public class AuditLog {
     public void setIpAddress(String ipAddress) { this.ipAddress = ipAddress; }
 
     public Instant getCreatedAt() { return createdAt; }
+    public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
 }

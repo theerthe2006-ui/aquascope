@@ -14,6 +14,8 @@ export type PolymerType = 'PE' | 'PP' | 'PS' | 'PVC' | 'PET' | 'PA_NYLON' | 'PU'
 
 export type IdentificationMethod = 'MORPHOLOGICAL_ONLY' | 'FTIR_MATCH' | 'RAMAN_MATCH' | 'PY_GC_MS' | 'HOT_NEEDLE_TEST';
 
+export type DeviceStatus = 'ACTIVE' | 'INACTIVE' | 'CALIBRATION_REQUIRED' | 'OFFLINE';
+
 export interface ApiResponse<T> {
   success: boolean;
   message: string;
@@ -131,6 +133,62 @@ export interface AnalysisReviewDto {
   decision: string;
   comments: string;
   reviewDate?: string;
+}
+
+export interface SampleImageDto {
+  id?: number;
+  waterSampleId?: number;
+  sampleAnalysisId?: number;
+  uploadedByUserId?: number;
+  uploadedByUsername?: string;
+  fileName: string;
+  storedFilePath: string;
+  contentType: string;
+  fileSizeBytes: number;
+  imagingModality: string;
+  magnification?: string;
+  description?: string;
+  createdAt?: string;
+}
+
+export interface DeviceDto {
+  id?: number;
+  deviceIdentifier: string;
+  name: string;
+  deviceType: string;
+  monitoringSiteId?: number;
+  monitoringSiteCode?: string;
+  manufacturer?: string;
+  firmwareVersion?: string;
+  status: DeviceStatus;
+  lastPing?: string;
+  createdAt?: string;
+}
+
+export interface SensorReadingDto {
+  id?: number;
+  deviceId: number;
+  deviceIdentifier?: string;
+  readingTimestamp: string;
+  metricType: string;
+  metricValue: number;
+  unit: string;
+  dataOrigin: DataOrigin;
+  rawPayload?: string;
+  createdAt?: string;
+}
+
+export interface AuditLogDto {
+  id: number;
+  userId?: number;
+  username: string;
+  action: string;
+  entityType: string;
+  entityId?: string;
+  dataOrigin: DataOrigin;
+  details?: string;
+  ipAddress?: string;
+  createdAt: string;
 }
 
 export interface DashboardStatsDto {

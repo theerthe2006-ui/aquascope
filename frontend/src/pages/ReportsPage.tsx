@@ -1,5 +1,5 @@
 import React from 'react';
-import { FileText, Download, CheckCircle, AlertCircle } from 'lucide-react';
+import { FileText, Download } from 'lucide-react';
 import api from '../services/api';
 
 export const ReportsPage: React.FC = () => {

@@ -7,6 +7,7 @@ import com.aquascope.repository.AnalysisReviewRepository;
 import com.aquascope.repository.AuditLogRepository;
 import com.aquascope.repository.SampleAnalysisRepository;
 import com.aquascope.repository.UserRepository;
+import com.aquascope.repository.WaterSampleRepository;
 import com.aquascope.security.UserPrincipal;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.Authentication;
@@ -23,17 +24,20 @@ public class ReviewWorkflowService {
 
     private final AnalysisReviewRepository reviewRepository;
     private final SampleAnalysisRepository analysisRepository;
+    private final WaterSampleRepository waterSampleRepository;
     private final UserRepository userRepository;
     private final AuditLogRepository auditLogRepository;
 
     public ReviewWorkflowService(
             AnalysisReviewRepository reviewRepository,
             SampleAnalysisRepository analysisRepository,
+            WaterSampleRepository waterSampleRepository,
             UserRepository userRepository,
             AuditLogRepository auditLogRepository
     ) {
         this.reviewRepository = reviewRepository;
         this.analysisRepository = analysisRepository;
+        this.waterSampleRepository = waterSampleRepository;
         this.userRepository = userRepository;
         this.auditLogRepository = auditLogRepository;
     }
@@ -79,6 +83,20 @@ public class ReviewWorkflowService {
         analysis.setStatus(newStatus);
         analysis.setUpdatedAt(Instant.now());
         analysisRepository.save(analysis);
+
+        // Synchronize parent WaterSample status
+        if (analysis.getWaterSample() != null) {
+            WaterSample sample = analysis.getWaterSample();
+            if (newStatus == AnalysisStatus.APPROVED) {
+                sample.setStatus(SampleStatus.APPROVED);
+            } else if (newStatus == AnalysisStatus.REJECTED) {
+                sample.setStatus(SampleStatus.REJECTED);
+            } else if (newStatus == AnalysisStatus.DRAFT) {
+                sample.setStatus(SampleStatus.IN_ANALYSIS);
+            }
+            sample.setUpdatedAt(Instant.now());
+            waterSampleRepository.save(sample);
+        }
 
         AuditLog log = new AuditLog();
         log.setEntityType("SAMPLE_ANALYSIS");

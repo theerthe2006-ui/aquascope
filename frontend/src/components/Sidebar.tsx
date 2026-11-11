@@ -71,7 +71,7 @@ export const Sidebar: React.FC = () => {
       <div className="p-4 border-t border-slate-800/80 bg-slate-950/20">
         <div className="flex items-center justify-between text-xs text-slate-400">
           <span>Release</span>
-          <span className="font-mono text-slate-300">Phase 1 (v1.0.0)</span>
+          <span className="font-mono text-cyan-400 font-semibold">Production (v1.0.0)</span>
         </div>
       </div>
     </aside>
