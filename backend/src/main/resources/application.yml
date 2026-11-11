@@ -11,7 +11,7 @@ spring:
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/aquascope}
     username: ${SPRING_DATASOURCE_USERNAME:aquascope_user}
-    password: ${SPRING_DATASOURCE_PASSWORD:AquaScopeSecure2026!}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
     driver-class-name: org.postgresql.Driver
     hikari:
       maximum-pool-size: 10
@@ -33,9 +33,9 @@ spring:
     locations: classpath:db/migration
 
 app:
-  version: 1.0.0-phase3
+  version: 1.0.0-production
   jwt:
-    secret: ${JWT_SECRET:404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970}
+    secret: ${JWT_SECRET:}
     expiration-ms: ${JWT_EXPIRATION_MS:86400000} # 24 hours
   upload:
     dir: ${UPLOAD_DIR:./uploads}
