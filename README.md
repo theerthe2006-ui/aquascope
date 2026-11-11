@@ -24,7 +24,7 @@ To ensure 100% free-tier operation without expiring trial databases or billable 
          └─── (S3-Compatible API) ──────────► [Cloudflare R2 Standard Object Storage]
                                                  - 10GB free tier storage
                                                  - Private bucket (`aquascope-evidence`)
-                                                 - Structural image decoding & SHA-256 checks
+                                                 - TwelveMonkeys WebP / ImageIO decoding & SHA-256
                                                  - Zero egress fees
 ```
 
@@ -39,28 +39,27 @@ To ensure 100% free-tier operation without expiring trial databases or billable 
 
 ---
 
-## Safe Deletion & Legacy Migration Strategy
+## Safe Evidence Deletion & Legacy Migration
 
-### 1. Two-Phase Safe Deletion State Machine
-Evidence deletion uses an autonomous database transaction (`REQUIRES_NEW`) to prevent metadata desynchronization:
-1. `markPendingDeletion(id)`: Flags the database record as `PENDING_DELETION`. The file is immediately blocked from viewing or downloading.
-2. `deleteObject(key)`: Calls Cloudflare R2 object deletion.
-3. If R2 fails, the transaction aborts with an HTTP 503 (`SERVICE_UNAVAILABLE`). The database record is safely retained as `PENDING_DELETION` and is retryable.
-4. `finalizeDeletion(id)`: Confirms complete purge from storage and commits database record deletion.
+### 1. Two-Phase Safe Deletion State Machine with Bounded Retries
+Evidence deletion uses autonomous database transactions (`Propagation.REQUIRES_NEW`) to prevent state desynchronization:
+1. `markPendingDeletion(id)`: Flags the database record as `PENDING_DELETION` and writes an audit log. The file is immediately blocked from viewing or downloading.
+2. `deleteObject(key)`: Executes object deletion on Cloudflare R2 with up to 3 bounded retries.
+3. If R2 fails across all 3 attempts, the operation returns an HTTP 503 (`SERVICE_UNAVAILABLE`). The database record remains securely committed as `PENDING_DELETION` and is retryable.
+4. `finalizeDeletion(id)`: Purges the storage object, writes a permanent deletion audit record with full file metadata and checksum, and removes the entity.
 
-### 2. Legacy Local Evidence Migration to Cloudflare R2
-Existing evidence records created prior to Flyway migration V3 are marked with `storage_backend = 'LOCAL'`:
-* Marking records as `LOCAL` **does not** automatically upload disk files to R2.
-* To migrate legacy local images into Cloudflare R2 without downtime, the Spring Boot application provides `LegacyEvidenceMigrationService`:
-  ```java
-  @Autowired
-  private LegacyEvidenceMigrationService legacyMigrationService;
-
-  // Scans all 'LOCAL' records, reads existing disk files, computes SHA-256,
-  // uploads to R2, validates with HeadObject, and updates backend to 'R2'
-  MigrationSummary summary = legacyMigrationService.migrateLegacyRecordsToR2();
-  ```
-* In production (`SPRING_PROFILES_ACTIVE=prod`), local filesystem fallback is strictly disabled. Legacy evidence must be migrated to R2 or it will not be served.
+### 2. Paginated Legacy Evidence Migration Procedure
+Legacy records created prior to Flyway migration V3 are marked with `storage_backend = 'LOCAL'`:
+* **Ephemeral Storage Warning:** In production (`SPRING_PROFILES_ACTIVE=prod`), Render containers run on an ephemeral filesystem where disk state is wiped on rebuilds. **Do not attempt to migrate legacy files from Render's ephemeral filesystem.**
+* **Operator Migration Procedure:** Legacy migration must be run from an environment (such as the developer workstation or server) that actually houses the original files:
+  1. Ensure the source images are present in the directory configured by `UPLOAD_DIR` (e.g. `./uploads`).
+  2. The Spring Boot application exposes `LegacyEvidenceMigrationService`:
+     ```java
+     // Batched/paginated migration with strict path normalization & SHA-256 verification
+     MigrationSummary summary = legacyMigrationService.migrateLegacyRecordsToR2(50);
+     ```
+  3. The utility verifies each physical file's normalized path, verifies it does not escape the upload root, reads its bytes, verifies its SHA-256 against R2 using `GetObject`, and updates the database record to `storage_backend = 'R2'` and `storage_status = 'AVAILABLE'`.
+  4. Missing local files are safely skipped and reported without falsifying metadata.
 
 ---
 

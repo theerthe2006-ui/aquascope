@@ -74,9 +74,9 @@ public class EvidenceStorageService {
     @Value("${app.upload.max-size-bytes:20971520}") // 20 MB max file size
     private long maxFileSizeBytes;
 
-    // Maximum safe dimension and pixel count to prevent decompression bombs (pixel flood)
+    // Strict safety limits to protect against decompression bombs / pixel floods
     private static final int MAX_IMAGE_DIMENSION = 8192; // 8K max width/height
-    private static final long MAX_TOTAL_PIXELS = 67108864L; // 8192 x 8192 = 64 megapixels max
+    private static final long MAX_TOTAL_PIXELS = 67108864L; // 64 megapixels max
 
     public EvidenceStorageService(
             @Value("${app.upload.dir:./uploads}") String uploadDir,
@@ -128,7 +128,8 @@ public class EvidenceStorageService {
             throw new RuntimeException("Failed to read evidence file bytes", e);
         }
 
-        // Full structural decode and decompression bomb protection (JPEG, PNG, WebP)
+        // Full structural decode and decompression bomb protection (WebP, JPEG, PNG)
+        // Rejects WebP if no registered decoder is available or raster fails
         String verifiedContentType = validateAndDecodeImageStructure(fileBytes);
 
         String originalFilename = file.getOriginalFilename();
@@ -136,7 +137,6 @@ public class EvidenceStorageService {
             throw new IllegalArgumentException("Invalid file path or name detected (path traversal prevention).");
         }
 
-        // Enforce strict resource-level modification access
         String currentUsername = SecurityContextHolder.getContext().getAuthentication().getName();
         User currentUser = userRepository.findByUsername(currentUsername)
                 .orElseThrow(() -> new ResourceNotFoundException("Authenticated user not found: " + currentUsername));
@@ -230,7 +230,6 @@ public class EvidenceStorageService {
             throw new ResourceNotFoundException("Evidence image is not available or has been scheduled for deletion.");
         }
 
-        // Strict resource-level access control
         validateEvidenceResourceAccess(image);
 
         String key = image.getObjectKey() != null ? image.getObjectKey() : image.getStoredFilePath();
@@ -256,7 +255,7 @@ public class EvidenceStorageService {
 
         boolean isProd = Arrays.asList(env.getActiveProfiles()).contains("prod");
         if (isProd) {
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Production storage unconfigured: Legacy or local storage cannot be read without R2 migration.");
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Production storage unconfigured: Local filesystem access forbidden in production.");
         }
 
         try {
@@ -276,7 +275,7 @@ public class EvidenceStorageService {
     }
 
     /**
-     * Non-blocking, retryable two-phase deletion workflow with autonomous database transactions.
+     * Safe, idempotent, two-phase evidence deletion with bounded retries and audit preservation.
      */
     public void deleteEvidence(Long imageId) {
         SampleImages image = sampleImagesRepository.findById(imageId)
@@ -284,20 +283,37 @@ public class EvidenceStorageService {
 
         validateEvidenceDeletionAccess(image);
 
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        String currentUsername = auth != null ? auth.getName() : "system";
+
         String key = image.getObjectKey() != null ? image.getObjectKey() : image.getStoredFilePath();
 
-        // 1. Commit PENDING_DELETION in an independent committed transaction.
-        // If the storage delete fails, the record remains safely flagged as PENDING_DELETION and cannot be viewed.
-        stateTransitionService.markPendingDeletion(imageId);
+        // 1. Autonomous transaction to commit PENDING_DELETION and write audit log
+        stateTransitionService.markPendingDeletion(imageId, currentUsername);
 
-        // 2. Perform object deletion on Cloudflare R2 or local storage
+        // 2. Perform object deletion on Cloudflare R2 with bounded retries (3 attempts)
+        boolean storageDeleted = false;
+        Exception lastStorageException = null;
+
         if ("R2".equals(image.getStorageBackend()) || (s3Client != null && r2Bucket != null && !r2Bucket.isBlank())) {
-            try {
-                log.info("Deleting evidence object from R2: {}", key);
-                s3Client.deleteObject(DeleteObjectRequest.builder().bucket(r2Bucket).key(key).build());
-            } catch (Exception e) {
-                log.error("Failed to delete object from R2: {}. State committed as PENDING_DELETION for retry.", e.getMessage(), e);
-                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Failed to delete from object storage. Record flagged as PENDING_DELETION and can be retried.", e);
+            for (int attempt = 1; attempt <= 3 && !storageDeleted; attempt++) {
+                try {
+                    log.info("Deleting evidence object from R2 (attempt {}/3): {}", attempt, key);
+                    s3Client.deleteObject(DeleteObjectRequest.builder().bucket(r2Bucket).key(key).build());
+                    storageDeleted = true;
+                } catch (Exception e) {
+                    lastStorageException = e;
+                    log.warn("R2 deletion attempt {} failed for key {}: {}", attempt, key, e.getMessage());
+                    try {
+                        Thread.sleep(100L * attempt);
+                    } catch (InterruptedException ignored) {}
+                }
+            }
+
+            if (!storageDeleted) {
+                log.error("All 3 R2 deletion attempts failed for key {}. Preserving PENDING_DELETION state.", key, lastStorageException);
+                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                        "Failed to delete object from cloud storage after 3 attempts. Record retained as PENDING_DELETION and can be safely retried.", lastStorageException);
             }
         } else {
             try {
@@ -309,8 +325,8 @@ public class EvidenceStorageService {
             }
         }
 
-        // 3. Object confirmed removed from storage: finalize deletion in independent committed transaction
-        stateTransitionService.finalizeDeletion(imageId);
+        // 3. Storage confirmed purged: write permanent deletion audit log and remove record
+        stateTransitionService.finalizeDeletion(imageId, currentUsername);
     }
 
     @Transactional(readOnly = true)
@@ -358,21 +374,18 @@ public class EvidenceStorageService {
         boolean isReviewer = auth.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_REVIEWER"));
 
         if (isAdmin || isReviewer) {
-            return; // Admins and Reviewers have legitimate read access to evaluate scientific submissions
+            return;
         }
 
-        // Original uploader always has access to their own evidence
         if (image.getUploadedByUser() != null && image.getUploadedByUser().getUsername().equals(username)) {
             return;
         }
 
-        // Specific analysis assignee check
         if (image.getSampleAnalysis() != null && image.getSampleAnalysis().getAnalyzedByUser() != null
                 && image.getSampleAnalysis().getAnalyzedByUser().getUsername().equals(username)) {
             return;
         }
 
-        // Specific sample collector check
         if (image.getWaterSample() != null && image.getWaterSample().getCollectedByUser() != null
                 && image.getWaterSample().getCollectedByUser().getUsername().equals(username)) {
             return;
@@ -393,7 +406,6 @@ public class EvidenceStorageService {
             return;
         }
 
-        // Only original uploader can delete their unverified evidence
         if (image.getUploadedByUser() != null && image.getUploadedByUser().getUsername().equals(username)) {
             return;
         }
@@ -464,14 +476,13 @@ public class EvidenceStorageService {
         throw new AccessDeniedException("Access denied: You cannot attach evidence to another researcher's analysis session.");
     }
 
-    // --- Complete Structural Image Decoding via ImageIO & Plugin ---
+    // --- Complete Structural Image Decoding via ImageIO & Registered Plugins ---
 
     private String validateAndDecodeImageStructure(byte[] bytes) {
         if (bytes == null || bytes.length < 12) {
             throw new IllegalArgumentException("Unsupported or corrupt file format: File too small to contain valid image headers.");
         }
 
-        // 1. Initial format detection by magic bytes
         String detectedFormat = null;
         if ((bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xD8 && (bytes[2] & 0xFF) == 0xFF) {
             detectedFormat = "image/jpeg";
@@ -487,30 +498,22 @@ public class EvidenceStorageService {
             throw new IllegalArgumentException("Unsupported image format. Allowed: JPEG, PNG, and WebP.");
         }
 
-        // 2. Structural decoding for all formats (JPEG, PNG, WebP) using ImageIO
+        // Structural decoding using ImageIO with registered plugins (including TwelveMonkeys WebP)
         try (ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
              ImageInputStream iis = ImageIO.createImageInputStream(bais)) {
 
             Iterator<ImageReader> readers = ImageIO.getImageReaders(iis);
             if (!readers.hasNext()) {
-                // If WebP plugin is missing in test environment, perform container verification
-                if ("image/webp".equals(detectedFormat)) {
-                    int riffLength = ((bytes[7] & 0xFF) << 24) | ((bytes[6] & 0xFF) << 16) | ((bytes[5] & 0xFF) << 8) | (bytes[4] & 0xFF);
-                    if (riffLength <= 0 || bytes.length < riffLength + 8) {
-                        throw new IllegalArgumentException("Truncated or malformed WebP image stream.");
-                    }
-                    return detectedFormat;
-                }
-                throw new IllegalArgumentException("Malformed or unreadable image stream: No decoder found.");
+                throw new IllegalArgumentException("No registered decoder found for format: " + detectedFormat + ". Complete structural decoding required.");
             }
 
             ImageReader reader = readers.next();
             reader.setInput(iis, true, true);
 
+            // Read dimensions before reading raster to prevent decompression bombs
             int width = reader.getWidth(0);
             int height = reader.getHeight(0);
 
-            // Decompression bomb (pixel flood) defense
             if (width <= 0 || height <= 0 || width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) {
                 throw new IllegalArgumentException(String.format(
                         "Image dimensions (%dx%d) exceed maximum safety limit of %dx%d (decompression bomb protection).",
@@ -526,7 +529,7 @@ public class EvidenceStorageService {
                 ));
             }
 
-            // Verify raster decode
+            // Decode full raster
             BufferedImage image = reader.read(0);
             if (image == null) {
                 throw new IllegalArgumentException("Corrupt image data: Failed to decode raster frame.");
@@ -536,7 +539,7 @@ public class EvidenceStorageService {
             if (e instanceof IllegalArgumentException) {
                 throw (IllegalArgumentException) e;
             }
-            throw new IllegalArgumentException("Corrupted or malformed image file: " + e.getMessage(), e);
+            throw new IllegalArgumentException("Corrupted, malformed or undecodable image stream: " + e.getMessage(), e);
         }
 
         return detectedFormat;

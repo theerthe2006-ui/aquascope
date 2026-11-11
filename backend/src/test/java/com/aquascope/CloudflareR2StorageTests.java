@@ -72,7 +72,15 @@ public class CloudflareR2StorageTests {
         g.dispose();
 
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        ImageIO.write(image, format, baos);
+        boolean written = ImageIO.write(image, format, baos);
+        if (!written && "webp".equalsIgnoreCase(format)) {
+            // Minimal valid 1x1 lossy WebP frame if TwelveMonkeys writer is absent in test classpath
+            return new byte[]{
+                    'R', 'I', 'F', 'F', 0x1A, 0x00, 0x00, 0x00, 'W', 'E', 'B', 'P',
+                    'V', 'P', '8', ' ', 0x0E, 0x00, 0x00, 0x00,
+                    (byte) 0x9D, 0x01, 0x2A, 0x01, 0x00, 0x01, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00
+            };
+        }
         return baos.toByteArray();
     }
 
@@ -115,31 +123,6 @@ public class CloudflareR2StorageTests {
     }
 
     @Test
-    @DisplayName("Should successfully upload WebP image when valid RIFF...WEBP structure is provided")
-    void shouldUploadWebPImage() {
-        byte[] payload = new byte[]{
-                'R', 'I', 'F', 'F',
-                0x08, 0x00, 0x00, 0x00,
-                'W', 'E', 'B', 'P',
-                'V', 'P', '8', ' '
-        };
-        MockMultipartFile file = new MockMultipartFile(
-                "file", "fiber.webp", "image/webp", payload
-        );
-
-        when(s3Client.putObject(any(PutObjectRequest.class), any(RequestBody.class)))
-                .thenReturn(PutObjectResponse.builder().build());
-
-        SampleImageDto result = evidenceStorageService.storeEvidence(
-                file, null, null, "BRIGHTFIELD_MICROSCOPY", "100x", "Microfiber WebP"
-        );
-
-        assertNotNull(result);
-        assertEquals("image/webp", result.contentType());
-        assertTrue(result.objectKey().endsWith(".webp"));
-    }
-
-    @Test
     @DisplayName("Should reject malformed image bytes even if declared as PNG")
     void shouldRejectMalformedImageBytes() {
         byte[] corruptBytes = new byte[]{
@@ -155,6 +138,23 @@ public class CloudflareR2StorageTests {
         });
 
         verify(s3Client, never()).putObject(any(PutObjectRequest.class), any(RequestBody.class));
+    }
+
+    @Test
+    @DisplayName("Should reject malformed or truncated WebP image")
+    void shouldRejectMalformedWebPImage() {
+        // Starts with RIFF and WEBP but truncated before VP8 chunks
+        byte[] truncatedWebp = new byte[]{
+                'R', 'I', 'F', 'F', 0x14, 0x00, 0x00, 0x00, 'W', 'E', 'B', 'P',
+                'V', 'P', '8', ' '
+        };
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "truncated.webp", "image/webp", truncatedWebp
+        );
+
+        assertThrows(IllegalArgumentException.class, () -> {
+            evidenceStorageService.storeEvidence(file, null, null, null, null, null);
+        });
     }
 
     @Test
@@ -260,7 +260,7 @@ public class CloudflareR2StorageTests {
         image.setStorageBackend("R2");
         SampleImages saved = sampleImagesRepository.save(image);
 
-        // Switch security context to unauthorized external guest or field officer not on this sample
+        // Switch security context to field_officer not on this sample
         UsernamePasswordAuthenticationToken otherAuth =
                 new UsernamePasswordAuthenticationToken("field_officer", "password",
                         List.of(new SimpleGrantedAuthority("ROLE_ENVIRONMENTAL_FIELD_OFFICER")));
@@ -317,8 +317,31 @@ public class CloudflareR2StorageTests {
             evidenceStorageService.deleteEvidence(saved.getId());
         });
 
-        // Autonomous transaction committed PENDING_DELETION
         SampleImages updated = sampleImagesRepository.findById(saved.getId()).orElseThrow();
         assertEquals("PENDING_DELETION", updated.getStorageStatus());
+    }
+
+    @Test
+    @DisplayName("Safe deletion: Repeated deletion request on PENDING_DELETION is idempotent and retries storage delete")
+    void shouldRetryPendingDeletionIdempotently() {
+        User researcher = userRepository.findByUsername("researcher").orElseThrow();
+        SampleImages image = new SampleImages();
+        image.setFileName("retry_delete.png");
+        image.setStoredFilePath("evidence/retry_delete.png");
+        image.setObjectKey("evidence/retry_delete.png");
+        image.setContentType("image/png");
+        image.setFileSizeBytes(100L);
+        image.setStorageStatus("PENDING_DELETION");
+        image.setUploadedByUser(researcher);
+        image.setStorageBackend("R2");
+        SampleImages saved = sampleImagesRepository.save(image);
+
+        when(s3Client.deleteObject(any(DeleteObjectRequest.class)))
+                .thenReturn(DeleteObjectResponse.builder().build());
+
+        evidenceStorageService.deleteEvidence(saved.getId());
+
+        verify(s3Client, times(1)).deleteObject(any(DeleteObjectRequest.class));
+        assertFalse(sampleImagesRepository.findById(saved.getId()).isPresent());
     }
 }
