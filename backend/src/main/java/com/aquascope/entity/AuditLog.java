@@ -42,22 +42,16 @@ public class AuditLog {
 
     public AuditLog() {}
 
-    public AuditLog(User user, String username, String action, String entityType, String entityId, DataOrigin dataOrigin, String details, String ipAddress) {
-        this.user = user;
-        this.username = username;
-        this.action = action;
-        this.entityType = entityType;
-        this.entityId = entityId;
-        this.dataOrigin = dataOrigin;
-        this.details = details;
-        this.ipAddress = ipAddress;
-    }
-
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
 
     public User getUser() { return user; }
-    public void setUser(User user) { this.user = user; }
+    public void setUser(User user) { 
+        this.user = user; 
+        if (user != null && this.username == null) {
+            this.username = user.getUsername();
+        }
+    }
 
     public String getUsername() { return username; }
     public void setUsername(String username) { this.username = username; }

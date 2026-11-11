@@ -45,7 +45,7 @@ public class WaterSample {
     private BigDecimal turbidityNtu;
 
     @Column(name = "collection_source", nullable = false, length = 100)
-    private String collectionSource; // SURFACE, MID_COLUMN, etc.
+    private String collectionSource;
 
     @Column(name = "weather_conditions", length = 150)
     private String weatherConditions;
@@ -124,4 +124,5 @@ public class WaterSample {
 
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
 }

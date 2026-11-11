@@ -49,6 +49,19 @@ public class MonitoringSite {
 
     public MonitoringSite() {}
 
+    public MonitoringSite(String code, String name, String description, WaterSourceCategory waterSourceCategory,
+                          BigDecimal latitude, BigDecimal longitude, BigDecimal elevationMeters, User createdByUser) {
+        this.code = code;
+        this.name = name;
+        this.description = description;
+        this.waterSourceCategory = waterSourceCategory;
+        this.latitude = latitude;
+        this.longitude = longitude;
+        this.elevationMeters = elevationMeters;
+        this.createdByUser = createdByUser;
+        this.active = true;
+    }
+
     @PreUpdate
     public void preUpdate() {
         this.updatedAt = Instant.now();
@@ -86,4 +99,5 @@ public class MonitoringSite {
 
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
 }

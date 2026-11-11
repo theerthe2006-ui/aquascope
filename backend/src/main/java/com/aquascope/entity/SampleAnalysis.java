@@ -26,7 +26,7 @@ public class SampleAnalysis {
     private Instant analysisDate;
 
     @Column(name = "analysis_method", nullable = false, length = 100)
-    private String analysisMethod; // OPTICAL_MICROSCOPY, FTIR_SPECTROSCOPY, etc.
+    private String analysisMethod;
 
     @Column(name = "equipment_model", length = 200)
     private String equipmentModel;
@@ -51,7 +51,7 @@ public class SampleAnalysis {
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 50)
-    private AnalysisStatus status = AnalysisStatus.COMPLETED;
+    private AnalysisStatus status = AnalysisStatus.DRAFT;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "data_origin", nullable = false, length = 50)
@@ -60,30 +60,20 @@ public class SampleAnalysis {
     @Column(columnDefinition = "TEXT")
     private String notes;
 
-    @OneToMany(mappedBy = "sampleAnalysis", cascade = CascadeType.ALL, orphanRemoval = true)
-    private List<ParticleObservation> observations = new ArrayList<>();
-
     @Column(name = "created_at", updatable = false)
     private Instant createdAt = Instant.now();
 
     @Column(name = "updated_at")
     private Instant updatedAt = Instant.now();
 
+    @OneToMany(mappedBy = "sampleAnalysis", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<ParticleObservation> observations = new ArrayList<>();
+
     public SampleAnalysis() {}
 
     @PreUpdate
     public void preUpdate() {
         this.updatedAt = Instant.now();
-    }
-
-    public void addObservation(ParticleObservation observation) {
-        observations.add(observation);
-        observation.setSampleAnalysis(this);
-    }
-
-    public void removeObservation(ParticleObservation observation) {
-        observations.remove(observation);
-        observation.setSampleAnalysis(null);
     }
 
     public Long getId() { return id; }
@@ -131,9 +121,10 @@ public class SampleAnalysis {
     public String getNotes() { return notes; }
     public void setNotes(String notes) { this.notes = notes; }
 
-    public List<ParticleObservation> getObservations() { return observations; }
-    public void setObservations(List<ParticleObservation> observations) { this.observations = observations; }
-
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
+
+    public List<ParticleObservation> getObservations() { return observations; }
+    public void setObservations(List<ParticleObservation> observations) { this.observations = observations; }
 }

@@ -1,5 +1,6 @@
 package com.aquascope.repository;
 
+import com.aquascope.entity.DataOrigin;
 import com.aquascope.entity.SampleStatus;
 import com.aquascope.entity.WaterSample;
 import org.springframework.data.domain.Page;
@@ -16,6 +17,11 @@ public interface WaterSampleRepository extends JpaRepository<WaterSample, Long> 
     Optional<WaterSample> findBySampleIdentifier(String sampleIdentifier);
     boolean existsBySampleIdentifier(String sampleIdentifier);
 
+    Page<WaterSample> findBySampleIdentifierContainingIgnoreCase(String identifier, Pageable pageable);
+    Page<WaterSample> findByMonitoringSiteId(Long siteId, Pageable pageable);
+    Page<WaterSample> findByStatus(SampleStatus status, Pageable pageable);
+    Page<WaterSample> findByDataOrigin(DataOrigin dataOrigin, Pageable pageable);
+
     @Query("SELECT s FROM WaterSample s WHERE " +
            "(:siteId IS NULL OR s.monitoringSite.id = :siteId) AND " +
            "(:status IS NULL OR s.status = :status) AND " +
@@ -29,4 +35,5 @@ public interface WaterSampleRepository extends JpaRepository<WaterSample, Long> 
     );
 
     long countByStatus(SampleStatus status);
+    long countByDataOrigin(DataOrigin dataOrigin);
 }
