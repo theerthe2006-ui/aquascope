@@ -1,6 +1,6 @@
 # AQUASCOPE — Microplastic Intelligence & Water Monitoring Platform
 
-AQUASCOPE is a scientific software platform for environmental monitoring teams, laboratory researchers, and water resource managers to record, review, analyse, and report microplastic observations in water bodies with strict scientific integrity, provenance tracking, and role-based permissions.
+AQUASCOPE is a scientific software platform for environmental monitoring teams, laboratory researchers, and water resource managers to record, review, analyse, and report microplastic observations in water bodies with strict scientific integrity, provenance tracking, and fine-grained resource-level permissions.
 
 ---
 
@@ -24,7 +24,7 @@ To ensure 100% free-tier operation without expiring trial databases or billable 
          └─── (S3-Compatible API) ──────────► [Cloudflare R2 Standard Object Storage]
                                                  - 10GB free tier storage
                                                  - Private bucket (`aquascope-evidence`)
-                                                 - SHA-256 checksum & MIME signature checks
+                                                 - Structural image decoding & SHA-256 checks
                                                  - Zero egress fees
 ```
 
@@ -36,6 +36,31 @@ To ensure 100% free-tier operation without expiring trial databases or billable 
 | **Neon** | Serverless PostgreSQL | 0.5 GiB storage, scales to zero when inactive | Hikari `minimumIdle=0`, `connectionTimeout=30s`, `idleTimeout=60s` for smooth suspend/resume |
 | **Cloudflare** | R2 Object Storage | 10 GB storage, 1M Class A ops/mo, 10M Class B ops/mo, **0$ egress** | Private bucket, streamed authenticated access, UUID keys |
 | **Vercel** | Frontend Hosting | 100GB bandwidth/mo, unlimited preview deploys | Production-optimized static build (`dist/`) with SPA rewrites |
+
+---
+
+## Safe Deletion & Legacy Migration Strategy
+
+### 1. Two-Phase Safe Deletion State Machine
+Evidence deletion uses an autonomous database transaction (`REQUIRES_NEW`) to prevent metadata desynchronization:
+1. `markPendingDeletion(id)`: Flags the database record as `PENDING_DELETION`. The file is immediately blocked from viewing or downloading.
+2. `deleteObject(key)`: Calls Cloudflare R2 object deletion.
+3. If R2 fails, the transaction aborts with an HTTP 503 (`SERVICE_UNAVAILABLE`). The database record is safely retained as `PENDING_DELETION` and is retryable.
+4. `finalizeDeletion(id)`: Confirms complete purge from storage and commits database record deletion.
+
+### 2. Legacy Local Evidence Migration to Cloudflare R2
+Existing evidence records created prior to Flyway migration V3 are marked with `storage_backend = 'LOCAL'`:
+* Marking records as `LOCAL` **does not** automatically upload disk files to R2.
+* To migrate legacy local images into Cloudflare R2 without downtime, the Spring Boot application provides `LegacyEvidenceMigrationService`:
+  ```java
+  @Autowired
+  private LegacyEvidenceMigrationService legacyMigrationService;
+
+  // Scans all 'LOCAL' records, reads existing disk files, computes SHA-256,
+  // uploads to R2, validates with HeadObject, and updates backend to 'R2'
+  MigrationSummary summary = legacyMigrationService.migrateLegacyRecordsToR2();
+  ```
+* In production (`SPRING_PROFILES_ACTIVE=prod`), local filesystem fallback is strictly disabled. Legacy evidence must be migrated to R2 or it will not be served.
 
 ---
 
@@ -96,7 +121,7 @@ Configure these environment variables in your Render Web Service settings:
 Migrations are managed automatically by Flyway upon application boot:
 - `V1__initial_schema.sql`: 11 core tables (users, sites, samples, analyses, observations, devices, logs).
 - `V2__seed_initial_users.sql`: Seeded role accounts with BCrypt-hashed passwords.
-- `V3__evidence_checksum_and_storage_key.sql`: Schema enhancement for Cloudflare R2 object keys and SHA-256 integrity checksums.
+- `V3__evidence_checksum_and_storage_key.sql`: Schema enhancement for Cloudflare R2 object keys, SHA-256 integrity checksums, and storage states (`AVAILABLE`, `PENDING_DELETION`, `DELETED`).
 
 ### 2. Run Backend Tests
 ```powershell

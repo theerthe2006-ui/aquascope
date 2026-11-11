@@ -117,10 +117,9 @@ public class CloudflareR2StorageTests {
     @Test
     @DisplayName("Should successfully upload WebP image when valid RIFF...WEBP structure is provided")
     void shouldUploadWebPImage() {
-        // Valid WebP header: RIFF (bytes 0-3) + file size (bytes 4-7) + WEBP (bytes 8-11) + payload
         byte[] payload = new byte[]{
                 'R', 'I', 'F', 'F',
-                0x08, 0x00, 0x00, 0x00, // length of rest of file = 8
+                0x08, 0x00, 0x00, 0x00,
                 'W', 'E', 'B', 'P',
                 'V', 'P', '8', ' '
         };
@@ -250,7 +249,6 @@ public class CloudflareR2StorageTests {
     @Test
     @DisplayName("Resource-level authorization: Unrelated user cannot download evidence by guessing image ID")
     void shouldEnforceResourceLevelAuthorizationForImageDownload() {
-        // Evidence uploaded by researcher
         User researcher = userRepository.findByUsername("researcher").orElseThrow();
         SampleImages image = new SampleImages();
         image.setFileName("confidential.png");
@@ -286,7 +284,6 @@ public class CloudflareR2StorageTests {
         image.setUploadedByUser(researcher);
         SampleImages saved = sampleImagesRepository.save(image);
 
-        // Switch to field_officer
         UsernamePasswordAuthenticationToken otherAuth =
                 new UsernamePasswordAuthenticationToken("field_officer", "password",
                         List.of(new SimpleGrantedAuthority("ROLE_ENVIRONMENTAL_FIELD_OFFICER")));
@@ -296,12 +293,11 @@ public class CloudflareR2StorageTests {
             evidenceStorageService.deleteEvidence(saved.getId());
         });
 
-        // Record must remain intact
         assertTrue(sampleImagesRepository.findById(saved.getId()).isPresent());
     }
 
     @Test
-    @DisplayName("Safe deletion: R2 failure marks status PENDING_DELETION and preserves metadata")
+    @DisplayName("Safe two-phase deletion: R2 failure marks status PENDING_DELETION and preserves metadata")
     void shouldMarkPendingDeletionWhenR2Fails() {
         User researcher = userRepository.findByUsername("researcher").orElseThrow();
         SampleImages image = new SampleImages();
@@ -321,7 +317,7 @@ public class CloudflareR2StorageTests {
             evidenceStorageService.deleteEvidence(saved.getId());
         });
 
-        // Metadata is preserved and flagged as PENDING_DELETION
+        // Autonomous transaction committed PENDING_DELETION
         SampleImages updated = sampleImagesRepository.findById(saved.getId()).orElseThrow();
         assertEquals("PENDING_DELETION", updated.getStorageStatus());
     }
