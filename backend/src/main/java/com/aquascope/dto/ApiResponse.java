@@ -14,6 +14,18 @@ public record ApiResponse<T>(
         return new ApiResponse<>(true, message, data, Instant.now(), null);
     }
 
+    public static <T> ApiResponse<T> ok(T data, String message) {
+        return new ApiResponse<>(true, message, data, Instant.now(), null);
+    }
+
+    public static <T> ApiResponse<T> ok(T data) {
+        return new ApiResponse<>(true, "Operation successful", data, Instant.now(), null);
+    }
+
+    public static <T> ApiResponse<T> error(String message) {
+        return new ApiResponse<>(false, message, null, Instant.now(), null);
+    }
+
     public static <T> ApiResponse<T> error(String message, Map<String, String> errors) {
         return new ApiResponse<>(false, message, null, Instant.now(), errors);
     }
