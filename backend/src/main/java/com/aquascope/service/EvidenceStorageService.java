@@ -14,28 +14,32 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.UrlResource;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.server.ResponseStatusException;
 import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.MalformedURLException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
@@ -55,18 +59,13 @@ public class EvidenceStorageService {
     private final SampleAnalysisRepository sampleAnalysisRepository;
     private final UserRepository userRepository;
     private final S3Client s3Client;
+    private final Environment env;
 
     @Value("${app.r2.bucket:aquascope-evidence}")
     private String r2Bucket;
 
-    private static final List<String> ALLOWED_CONTENT_TYPES = Arrays.asList(
-            "image/jpeg",
-            "image/png",
-            "image/tiff",
-            "image/webp"
-    );
-
-    private static final long MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB
+    @Value("${app.upload.max-size-bytes:20971520}") // Default 20 MB
+    private long maxFileSizeBytes;
 
     public EvidenceStorageService(
             @Value("${app.upload.dir:./uploads}") String uploadDir,
@@ -74,12 +73,14 @@ public class EvidenceStorageService {
             WaterSampleRepository waterSampleRepository,
             SampleAnalysisRepository sampleAnalysisRepository,
             UserRepository userRepository,
+            Environment env,
             @Autowired(required = false) S3Client s3Client
     ) {
         this.sampleImagesRepository = sampleImagesRepository;
         this.waterSampleRepository = waterSampleRepository;
         this.sampleAnalysisRepository = sampleAnalysisRepository;
         this.userRepository = userRepository;
+        this.env = env;
         this.s3Client = s3Client;
         this.localFallbackStorageLocation = Paths.get(uploadDir).toAbsolutePath().normalize();
 
@@ -103,21 +104,10 @@ public class EvidenceStorageService {
             throw new IllegalArgumentException("Cannot upload empty evidence file.");
         }
 
-        if (file.getSize() > MAX_FILE_SIZE_BYTES) {
-            throw new IllegalArgumentException("File size exceeds 20MB limit.");
+        if (file.getSize() > maxFileSizeBytes) {
+            throw new IllegalArgumentException("File size exceeds maximum permitted limit (" + (maxFileSizeBytes / (1024 * 1024)) + "MB).");
         }
 
-        String contentType = file.getContentType();
-        if (contentType == null || !ALLOWED_CONTENT_TYPES.contains(contentType.toLowerCase())) {
-            throw new IllegalArgumentException("Invalid file type: " + contentType + ". Allowed: JPEG, PNG, TIFF, WebP.");
-        }
-
-        String originalFilename = file.getOriginalFilename();
-        if (originalFilename == null || originalFilename.contains("..") || originalFilename.contains("/") || originalFilename.contains("\\")) {
-            throw new IllegalArgumentException("Invalid file path or name detected (path traversal prevention).");
-        }
-
-        // Validate actual file magic bytes (signatures)
         byte[] fileBytes;
         try {
             fileBytes = file.getBytes();
@@ -125,37 +115,47 @@ public class EvidenceStorageService {
             throw new RuntimeException("Failed to read evidence file bytes", e);
         }
 
-        validateFileSignature(fileBytes, contentType);
+        // Detect and validate real MIME type using magic numbers (never trust client header)
+        String verifiedContentType = detectAndValidateSignature(fileBytes);
 
-        // Compute SHA-256 Checksum for evidence integrity
+        String originalFilename = file.getOriginalFilename();
+        if (originalFilename == null || originalFilename.contains("..") || originalFilename.contains("/") || originalFilename.contains("\\")) {
+            throw new IllegalArgumentException("Invalid file path or name detected (path traversal prevention).");
+        }
+
+        // Determine safe extension based solely on verified MIME type
+        String extension = switch (verifiedContentType) {
+            case "image/jpeg" -> ".jpg";
+            case "image/png" -> ".png";
+            case "image/webp" -> ".webp";
+            default -> ".bin";
+        };
+
+        String objectKey = "evidence/" + UUID.randomUUID().toString() + extension;
         String sha256Checksum = calculateSha256(fileBytes);
 
-        // Clean extension and generate secure UUID object key
-        String extension = "";
-        int dotIndex = originalFilename.lastIndexOf('.');
-        if (dotIndex > 0) {
-            extension = originalFilename.substring(dotIndex);
-        }
-        String objectKey = "evidence/" + UUID.randomUUID().toString() + extension;
+        boolean isProd = Arrays.asList(env.getActiveProfiles()).contains("prod");
 
-        // Store to Cloudflare R2 if configured, else store to local fallback
         if (s3Client != null && r2Bucket != null && !r2Bucket.isBlank()) {
             try {
                 log.info("Uploading evidence object to Cloudflare R2 bucket: {}, key: {}", r2Bucket, objectKey);
                 PutObjectRequest putRequest = PutObjectRequest.builder()
                         .bucket(r2Bucket)
                         .key(objectKey)
-                        .contentType(contentType)
+                        .contentType(verifiedContentType)
                         .contentLength((long) fileBytes.length)
                         .build();
 
                 s3Client.putObject(putRequest, RequestBody.fromBytes(fileBytes));
             } catch (Exception e) {
                 log.error("Failed to store evidence in Cloudflare R2: {}", e.getMessage(), e);
-                throw new RuntimeException("Failed to upload evidence to secure object storage", e);
+                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Object storage upload failure", e);
             }
         } else {
-            // Local fallback
+            if (isProd) {
+                throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Production storage unconfigured: R2 client unavailable.");
+            }
+            // Local development fallback
             try {
                 Path targetLocation = this.localFallbackStorageLocation.resolve(objectKey.replace("evidence/", "")).normalize();
                 if (!targetLocation.startsWith(this.localFallbackStorageLocation)) {
@@ -176,7 +176,7 @@ public class EvidenceStorageService {
         image.setStoredFilePath(objectKey);
         image.setObjectKey(objectKey);
         image.setSha256Checksum(sha256Checksum);
-        image.setContentType(contentType);
+        image.setContentType(verifiedContentType);
         image.setFileSizeBytes((long) fileBytes.length);
         image.setImagingModality(imagingModality != null ? imagingModality : "BRIGHTFIELD_MICROSCOPY");
         image.setMagnification(magnification);
@@ -203,9 +203,11 @@ public class EvidenceStorageService {
         SampleImages image = sampleImagesRepository.findById(imageId)
                 .orElseThrow(() -> new ResourceNotFoundException("Evidence image not found with ID: " + imageId));
 
+        // Enforce authorization for the requested evidence image
+        validateEvidenceAccess(image);
+
         String key = image.getObjectKey() != null ? image.getObjectKey() : image.getStoredFilePath();
 
-        // Retrieve from Cloudflare R2 if client is configured
         if (s3Client != null && r2Bucket != null && !r2Bucket.isBlank()) {
             try {
                 log.info("Streaming evidence object from Cloudflare R2 bucket: {}, key: {}", r2Bucket, key);
@@ -216,13 +218,21 @@ public class EvidenceStorageService {
 
                 ResponseBytes<GetObjectResponse> objectBytes = s3Client.getObjectAsBytes(getRequest);
                 return new ByteArrayResource(objectBytes.asByteArray());
-            } catch (Exception e) {
-                log.error("Failed to fetch object from R2: {}", e.getMessage(), e);
+            } catch (NoSuchKeyException e) {
+                log.warn("Evidence object missing from R2 bucket: {}", key);
                 throw new ResourceNotFoundException("Evidence object not found in object storage: " + image.getFileName());
+            } catch (Exception e) {
+                log.error("R2 storage/network failure fetching object {}: {}", key, e.getMessage(), e);
+                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Object storage temporarily unavailable", e);
             }
         }
 
-        // Local fallback
+        boolean isProd = Arrays.asList(env.getActiveProfiles()).contains("prod");
+        if (isProd) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Production storage unconfigured: R2 client unavailable.");
+        }
+
+        // Local development fallback
         try {
             Path filePath = this.localFallbackStorageLocation.resolve(key.replace("evidence/", "")).normalize();
             if (!filePath.startsWith(this.localFallbackStorageLocation)) {
@@ -244,20 +254,30 @@ public class EvidenceStorageService {
         SampleImages image = sampleImagesRepository.findById(imageId)
                 .orElseThrow(() -> new ResourceNotFoundException("Evidence image not found with ID: " + imageId));
 
+        validateEvidenceAccess(image);
+
         String key = image.getObjectKey() != null ? image.getObjectKey() : image.getStoredFilePath();
 
         if (s3Client != null && r2Bucket != null && !r2Bucket.isBlank()) {
             try {
+                log.info("Deleting evidence object from R2: {}", key);
                 s3Client.deleteObject(DeleteObjectRequest.builder().bucket(r2Bucket).key(key).build());
             } catch (Exception e) {
-                log.warn("Failed to delete object from R2 bucket: {}", e.getMessage());
+                log.error("Failed to delete object from R2: {}. Preserving PostgreSQL metadata.", e.getMessage(), e);
+                // Do not delete database record if R2 deletion fails; preserve metadata and throw error so caller can retry
+                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Failed to delete file from object storage; metadata preserved. Please retry.", e);
             }
         } else {
+            boolean isProd = Arrays.asList(env.getActiveProfiles()).contains("prod");
+            if (isProd) {
+                throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Production storage unconfigured: R2 client unavailable.");
+            }
             try {
                 Path filePath = this.localFallbackStorageLocation.resolve(key.replace("evidence/", "")).normalize();
                 Files.deleteIfExists(filePath);
             } catch (IOException e) {
-                log.warn("Failed to delete local fallback file: {}", e.getMessage());
+                log.error("Failed to delete local fallback file: {}", e.getMessage());
+                throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to delete local file; metadata preserved.", e);
             }
         }
 
@@ -280,33 +300,53 @@ public class EvidenceStorageService {
 
     @Transactional(readOnly = true)
     public SampleImages getImageEntity(Long id) {
-        return sampleImagesRepository.findById(id)
+        SampleImages image = sampleImagesRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Evidence not found with ID: " + id));
+        validateEvidenceAccess(image);
+        return image;
     }
 
-    private void validateFileSignature(byte[] bytes, String contentType) {
-        if (bytes == null || bytes.length < 4) {
-            throw new IllegalArgumentException("File is corrupted or too small.");
+    private void validateEvidenceAccess(SampleImages image) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated()) {
+            throw new AccessDeniedException("Authentication required to access evidence.");
         }
 
-        // JPEG: FF D8 FF
-        if (contentType.equalsIgnoreCase("image/jpeg")) {
-            if ((bytes[0] & 0xFF) != 0xFF || (bytes[1] & 0xFF) != 0xD8 || (bytes[2] & 0xFF) != 0xFF) {
-                throw new IllegalArgumentException("File content does not match JPEG signature.");
-            }
+        boolean hasElevatedRole = auth.getAuthorities().stream().anyMatch(a ->
+                a.getAuthority().equals("ROLE_ADMINISTRATOR") ||
+                a.getAuthority().equals("ROLE_LABORATORY_RESEARCHER") ||
+                a.getAuthority().equals("ROLE_REVIEWER") ||
+                a.getAuthority().equals("ROLE_ENVIRONMENTAL_FIELD_OFFICER")
+        );
+
+        if (!hasElevatedRole) {
+            throw new AccessDeniedException("Access denied: Insufficient role permissions to view or download scientific evidence.");
         }
-        // PNG: 89 50 4E 47
-        else if (contentType.equalsIgnoreCase("image/png")) {
-            if ((bytes[0] & 0xFF) != 0x89 || bytes[1] != 0x50 || bytes[2] != 0x4E || bytes[3] != 0x47) {
-                throw new IllegalArgumentException("File content does not match PNG signature.");
-            }
+    }
+
+    private String detectAndValidateSignature(byte[] bytes) {
+        if (bytes == null || bytes.length < 12) {
+            throw new IllegalArgumentException("Unsupported or corrupt file format: File size too small for header detection.");
         }
-        // WebP: RIFF ... WEBP
-        else if (contentType.equalsIgnoreCase("image/webp")) {
-            if (bytes.length < 12 || bytes[0] != 'R' || bytes[1] != 'I' || bytes[2] != 'F' || bytes[3] != 'F') {
-                throw new IllegalArgumentException("File content does not match WebP RIFF signature.");
-            }
+
+        // JPEG Magic Number: FF D8 FF
+        if ((bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xD8 && (bytes[2] & 0xFF) == 0xFF) {
+            return "image/jpeg";
         }
+
+        // PNG Magic Number: 89 50 4E 47 0D 0A 1A 0A
+        if ((bytes[0] & 0xFF) == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 &&
+            bytes[4] == 0x0D && bytes[5] == 0x0A && bytes[6] == 0x1A && bytes[7] == 0x0A) {
+            return "image/png";
+        }
+
+        // WebP Magic Number: RIFF (bytes 0-3) and WEBP (bytes 8-11)
+        if (bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F' &&
+            bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P') {
+            return "image/webp";
+        }
+
+        throw new IllegalArgumentException("Unsupported file format. Only verified JPEG, PNG, and WebP images are permitted.");
     }
 
     private String calculateSha256(byte[] data) {
