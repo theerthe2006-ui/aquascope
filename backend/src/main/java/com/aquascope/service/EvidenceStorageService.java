@@ -381,8 +381,8 @@ public class EvidenceStorageService {
             return;
         }
 
-        if (image.getSampleAnalysis() != null && image.getSampleAnalysis().getAnalyzedByUser() != null
-                && image.getSampleAnalysis().getAnalyzedByUser().getUsername().equals(username)) {
+        if (image.getSampleAnalysis() != null && image.getSampleAnalysis().getAnalystUser() != null
+                && image.getSampleAnalysis().getAnalystUser().getUsername().equals(username)) {
             return;
         }
 
@@ -455,7 +455,7 @@ public class EvidenceStorageService {
             return;
         }
 
-        if (analysis.getAnalyzedByUser() != null && analysis.getAnalyzedByUser().getUsername().equals(username)) {
+        if (analysis.getAnalystUser() != null && analysis.getAnalystUser().getUsername().equals(username)) {
             return;
         }
 
@@ -469,7 +469,7 @@ public class EvidenceStorageService {
             return;
         }
 
-        if (analysis.getAnalyzedByUser() != null && analysis.getAnalyzedByUser().getId().equals(currentUser.getId())) {
+        if (analysis.getAnalystUser() != null && analysis.getAnalystUser().getId().equals(currentUser.getId())) {
             return;
         }
 

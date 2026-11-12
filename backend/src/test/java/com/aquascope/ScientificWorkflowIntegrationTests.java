@@ -47,6 +47,15 @@ class ScientificWorkflowIntegrationTests {
     private ParticleObservationRepository particleObservationRepository;
 
     @Autowired
+    private SampleImagesRepository sampleImagesRepository;
+
+    @Autowired
+    private AnalysisReviewRepository analysisReviewRepository;
+
+    @Autowired
+    private AuditLogRepository auditLogRepository;
+
+    @Autowired
     private PasswordEncoder passwordEncoder;
 
     private String baseUrl;
@@ -58,6 +67,9 @@ class ScientificWorkflowIntegrationTests {
     void setUp() {
         baseUrl = "http://localhost:" + port + "/api/v1";
 
+        auditLogRepository.deleteAll();
+        analysisReviewRepository.deleteAll();
+        sampleImagesRepository.deleteAll();
         particleObservationRepository.deleteAll();
         sampleAnalysisRepository.deleteAll();
         waterSampleRepository.deleteAll();

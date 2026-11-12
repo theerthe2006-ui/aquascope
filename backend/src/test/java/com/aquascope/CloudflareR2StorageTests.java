@@ -84,8 +84,32 @@ public class CloudflareR2StorageTests {
         return baos.toByteArray();
     }
 
+    private User researcherUser;
+
     @BeforeEach
     void setUp() {
+        researcherUser = userRepository.findByUsername("researcher").orElseGet(() -> {
+            User u = new User();
+            u.setUsername("researcher");
+            u.setEmail("researcher@aquascope.org");
+            u.setPasswordHash("$2a$10$xyz");
+            u.setFullName("Dr. Elena Vance");
+            u.setRole(com.aquascope.entity.Role.LABORATORY_RESEARCHER);
+            u.setActive(true);
+            return userRepository.save(u);
+        });
+
+        userRepository.findByUsername("field_officer").orElseGet(() -> {
+            User u = new User();
+            u.setUsername("field_officer");
+            u.setEmail("field@aquascope.org");
+            u.setPasswordHash("$2a$10$xyz");
+            u.setFullName("Marcus Reed");
+            u.setRole(com.aquascope.entity.Role.ENVIRONMENTAL_FIELD_OFFICER);
+            u.setActive(true);
+            return userRepository.save(u);
+        });
+
         UsernamePasswordAuthenticationToken auth =
                 new UsernamePasswordAuthenticationToken("researcher", "password",
                         List.of(new SimpleGrantedAuthority("ROLE_LABORATORY_RESEARCHER")));

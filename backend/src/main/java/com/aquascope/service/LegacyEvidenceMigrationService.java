@@ -83,7 +83,8 @@ public class LegacyEvidenceMigrationService {
                     String key = record.getObjectKey() != null ? record.getObjectKey() : record.getStoredFilePath();
                     Path localFile = localFallbackLocation.resolve(key.replace("evidence/", "")).normalize();
 
-                    // Security: Verify normalized path does not escape the configured upload directory
+                    // Security: Verify normalized and real canonical path does not escape configured upload root (symlink guard)
+                    Path realFallbackLocation = localFallbackLocation.toRealPath();
                     if (!localFile.startsWith(localFallbackLocation)) {
                         log.error("Security violation: Path traversal detected in legacy record ID {}: {}", record.getId(), localFile);
                         failed++;
@@ -93,6 +94,14 @@ public class LegacyEvidenceMigrationService {
                     if (!Files.exists(localFile) || !Files.isReadable(localFile)) {
                         log.warn("Legacy evidence ID {} physical local file not found at: {}. Leaving record as LOCAL.", record.getId(), localFile);
                         missingLocalFiles++;
+                        continue;
+                    }
+
+                    Path realLocalFile = localFile.toRealPath();
+                    if (!realLocalFile.startsWith(realFallbackLocation)) {
+                        log.error("Security violation: Symbolic link traversal detected in legacy record ID {}: {} points to {}",
+                                record.getId(), localFile, realLocalFile);
+                        failed++;
                         continue;
                     }
 

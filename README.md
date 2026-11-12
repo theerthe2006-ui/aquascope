@@ -114,6 +114,83 @@ Configure these environment variables in your Render Web Service settings:
 
 ---
 
+## Production Deployment Guide
+
+Follow this step-by-step checklist to deploy the complete AQUASCOPE platform to production across Neon PostgreSQL, Cloudflare R2, Render, and Vercel.
+
+### Step 1: Create Neon Serverless PostgreSQL Database
+1. Sign in to your [Neon Console](https://console.neon.tech).
+2. Create a new project named `aquascope`.
+3. Under the **Dashboard**, locate your connection details. Copy the PostgreSQL connection URI.
+4. Prepare your JDBC URL by appending `?sslmode=require` to the hostname:
+   `jdbc:postgresql://<neon-host>/aquascope?sslmode=require`
+5. Note the database username and password.
+
+### Step 2: Create Cloudflare R2 Private Bucket and API Token
+1. Sign in to your [Cloudflare Dashboard](https://dash.cloudflare.com) and navigate to **R2**.
+2. Click **Create bucket** and name it `aquascope-evidence` (or your preferred name). Ensure bucket visibility remains **Private** (never enable public access).
+3. Under **Account Details**, copy your Account ID. The S3 endpoint URL will be:
+   `https://<account-id>.r2.cloudflarestorage.com`
+4. Navigate to **Manage R2 API Tokens** and click **Create API Token**.
+5. Select permissions: **Object Read & Write** scoped to your `aquascope-evidence` bucket.
+6. Copy the **Access Key ID** and **Secret Access Key**.
+
+### Step 3: Deploy Backend on Render
+1. Sign in to [Render](https://dashboard.render.com).
+2. Click **New +** -> **Web Service** and connect your GitHub repository (`theerthe2006-ui/aquascope`).
+3. Select Docker runtime (or use the repository's `render.yaml` Blueprint).
+   - Docker Context: `backend`
+   - Dockerfile Path: `backend/Dockerfile`
+   - Health Check Path: `/api/v1/health`
+4. Set the following environment variables under **Environment**:
+   - `SPRING_PROFILES_ACTIVE`: `prod`
+   - `SPRING_DATASOURCE_URL`: `jdbc:postgresql://<neon-host>/aquascope?sslmode=require`
+   - `SPRING_DATASOURCE_USERNAME`: `<your-neon-user>`
+   - `SPRING_DATASOURCE_PASSWORD`: `<your-neon-password>`
+   - `JWT_SECRET`: *(A secure 256-bit random base64 or hex string, at least 32 characters)*
+   - `CORS_ALLOWED_ORIGINS`: `https://<your-vercel-domain>.vercel.app` *(update once frontend is deployed)*
+   - `R2_ENDPOINT`: `https://<account-id>.r2.cloudflarestorage.com`
+   - `R2_BUCKET`: `aquascope-evidence`
+   - `R2_ACCESS_KEY_ID`: `<your-cloudflare-r2-access-key-id>`
+   - `R2_SECRET_ACCESS_KEY`: `<your-cloudflare-r2-secret-access-key>`
+   - `R2_REGION`: `auto`
+5. Click **Create Web Service**. Wait for the build and deployment to complete, and verify `/api/v1/health` returns HTTP 200 `{"status":"UP"}`. Copy your Render service URL (e.g., `https://aquascope-backend.onrender.com`).
+
+### Step 4: Deploy Frontend on Vercel
+1. Sign in to [Vercel](https://vercel.com).
+2. Click **Add New...** -> **Project** and import `theerthe2006-ui/aquascope`.
+3. Set **Root Directory** to `frontend`.
+4. Framework Preset: **Vite**.
+5. Under **Environment Variables**, add:
+   - `VITE_API_BASE_URL`: `https://<your-render-service>.onrender.com/api/v1`
+6. Click **Deploy**. Vercel will run `tsc -b && vite build` and deploy the SPA with client-side rewrites handled by `vercel.json`.
+7. Once deployed, copy your production Vercel URL (e.g. `https://aquascope.vercel.app`).
+
+### Step 5: Finalize CORS and Verify User Workflow
+1. Return to the Render dashboard for `aquascope-backend`.
+2. Update `CORS_ALLOWED_ORIGINS` to match your Vercel URL: `https://<your-vercel-domain>.vercel.app`.
+3. Trigger a redeployment on Render (or wait for the environment update to apply).
+4. Access your frontend on Vercel:
+   - Verify health check connectivity in the status indicator.
+   - Log in using your designated administrative account.
+   - Verify role-based navigation, water sample registration, laboratory particle observation entries, microscopy evidence upload, review workflow, and PDF/CSV export.
+
+---
+
+## Security Hardening & Demo Account Management
+
+> [!IMPORTANT]
+> **Production Launch Notice:** Flyway migration `V2__seed_initial_users.sql` includes initial seed accounts for evaluation environments. Before public or untrusted production access:
+> 1. Log in immediately as the administrator and rotate all user passwords or disable unused evaluation accounts via the user management API (`/api/v1/users/{id}`).
+> 2. Alternatively, run the following SQL script against your production Neon database before launch to deactivate demonstration accounts:
+>    ```sql
+>    UPDATE users SET active = false WHERE username IN ('admin', 'researcher', 'field_officer', 'reviewer');
+>    ```
+> 3. Generate a dedicated administrative account with a strong, unguessable password.
+> 4. Ensure `JWT_SECRET` is never committed to source control and is securely provided via cloud dashboard secrets.
+
+---
+
 ## Local Development & Testing Instructions
 
 ### 1. Database Migrations
